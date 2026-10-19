@@ -8,20 +8,20 @@ import {
   postTyping,
   register,
   setNick,
-  setStatus, // [BARU] Import fungsi setStatus
+  setStatus,
   unregister,
 } from '@/lib/chat';
 
 // Wire-format the client sends over the socket.
 type ClientEvent =
-  | { type: 'join'; clientId: string; name: string } // name di sini akan diisi oleh nick dari frontend
+  | { type: 'join'; clientId: string; name: string }
   | { type: 'message'; text: string }
   | { type: 'typing' }
   | { type: 'setNick'; nick: string; secret: string }
   | { type: 'addContact'; nick: string }
   | { type: 'dm'; to: string; text: string }
   | { type: 'dmHistory'; with: string }
-  | { type: 'setStatus'; status: string }; // [BARU] Tambahkan tipe setStatus
+  | { type: 'setStatus'; status: string };
 
 export function GET() {
   return experimental_upgradeWebSocket((ws) => {
