@@ -26,17 +26,8 @@ import { fieldsToObject, redis } from "./redis";
  * example still runs before Upstash is provisioned.
  */
 
-export type Message = {
-  id: string;
-  kind: "chat" | "system";
-  clientId: string;
-  name: string;
-  text: string;
-  ts: number;
-};
-
-export type User = { clientId: string; name: string; customStatus?: string };
-
+export type Message = { id: string; kind: "chat" | "system"; clientId: string; name: string; text: string; ts: number; avatarUrl?: string };
+export type User = { clientId: string; name: string; customStatus?: string; avatarUrl?: string };
 export type DM = { id: string; from: string; to: string; text: string; ts: number };
 
 type ServerEvent =
@@ -403,16 +394,20 @@ export async function join(
   send(ws, { type: "history", messages: await loadHistory() });
   await broadcastPresence(true);
 }
-export async function setStatus(ws: WebSocket, status: string): Promise<void> {
+
+export async function setStatus(ws: WebSocket, status: string, avatarUrl?: string): Promise<void> {
   const conn = hub.conns.get(ws);
   if (!conn) return;
-  const cleanStatus = clamp(status, 60, "sedang online");
-  conn.customStatus = cleanStatus;
+  conn.customStatus = clamp(status, 60, "sedang online");
+  
+  if (avatarUrl !== undefined) {
+    conn.avatarUrl = clamp(avatarUrl, 500, ""); // Mengizinkan URL gambar hingga 500 karakter
+  }
+  
   await touch(conn);
-  await broadcastPresence(true); // Sebar update status ke semua orang
+  await broadcastPresence(true);
 }
 
-/** Publish a chat message: deliver locally now, persist + fan out via the stream. */
 export async function postMessage(ws: WebSocket, text: string): Promise<void> {
   const conn = hub.conns.get(ws);
   if (!conn?.clientId) return;
@@ -425,6 +420,7 @@ export async function postMessage(ws: WebSocket, text: string): Promise<void> {
     name: conn.name,
     text: clean,
     ts: Date.now(),
+    avatarUrl: conn.avatarUrl // [BARU] Sematkan avatar pengirim di pesan
   };
   await publishMessage(message);
 }
