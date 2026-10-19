@@ -1,5 +1,6 @@
 import type { WebSocket } from "ws";
 import type Redis from "ioredis";
+import { createHash } from "node:crypto";
 import { fieldsToObject, redis } from "./redis";
 
 /**
@@ -36,16 +37,30 @@ export type Message = {
 
 export type User = { clientId: string; name: string };
 
+// Pesan privat (DM) antar nick.
+export type DM = { id: string; from: string; to: string; text: string; ts: number };
+
 type ServerEvent =
   | { type: "history"; messages: Message[] }
   | { type: "message"; message: Message }
   | { type: "presence"; count: number; users: User[] }
-  | { type: "typing"; clientId: string; name: string };
+  | { type: "typing"; clientId: string; name: string }
+  | { type: "nick_ok"; nick: string; contacts: string[] }
+  | { type: "nick_error"; reason: "invalid" | "taken" }
+  | { type: "contacts"; contacts: string[] }
+  | { type: "contact_error"; reason: "self" | "not_found" }
+  | { type: "dm"; message: DM }
+  | { type: "dm_history"; with: string; messages: DM[] };
 
 const CONNS_KEY = "chat:conns"; // ZSET connectionId -> lastSeen ms
 const META_KEY = "chat:connmeta"; // HASH connectionId -> { clientId, name }
 const MSG_STREAM = "chat:messages"; // durable message log + cross-instance relay
 const TYPING_STREAM = "chat:typing"; // transient typing relay
+const DM_STREAM = "chat:dm"; // relay DM lintas instance
+const DM_MAXLEN = 500;
+const DMLOG_MAXLEN = 100; // riwayat per pasangan nick
+const DM_HISTORY = 50;
+const NICK_RE = /^[a-z0-9_]{3,20}$/;
 
 const CONN_TTL_MS = 30_000; // a connection is gone if not refreshed within this window
 const HEARTBEAT_MS = 10_000; // how often we refresh our local connections
@@ -56,7 +71,7 @@ const TYPING_MAXLEN = 50; // cap the typing stream
 const HISTORY = 50; // messages replayed to a newly-joined client
 
 type ConnMeta = { clientId: string; name: string };
-type Conn = { connectionId: string; clientId: string; name: string };
+type Conn = { connectionId: string; clientId: string; name: string; nick: string };
 type StreamFields = { d: string; o: string };
 
 type Hub = {
@@ -64,6 +79,7 @@ type Hub = {
   conns: Map<WebSocket, Conn>;
   lastMsgId: string;
   lastTypingId: string;
+  lastDmId: string;
   heartbeat: ReturnType<typeof setInterval> | null;
   presence: ReturnType<typeof setInterval> | null;
   streamClient: Redis | null; // TCP client running the blocking read loop
@@ -81,6 +97,7 @@ const hub: Hub =
     conns: new Map<WebSocket, Conn>(),
     lastMsgId: "0-0",
     lastTypingId: "0-0",
+    lastDmId: "0-0",
     heartbeat: null,
     presence: null,
     streamClient: null,
@@ -224,8 +241,10 @@ async function runReadLoop(): Promise<void> {
         "STREAMS",
         MSG_STREAM,
         TYPING_STREAM,
+        DM_STREAM,
         hub.lastMsgId,
         hub.lastTypingId,
+        hub.lastDmId,
       )) as Array<[string, Array<[string, string[]]>]> | null;
 
       if (!res) continue; // BLOCK timed out with no new entries
@@ -238,6 +257,11 @@ async function runReadLoop(): Promise<void> {
             if (fields.o === hub.instanceId) continue; // our own — already delivered
             const message = parseJson<Message>(fields.d);
             if (message) broadcast({ type: "message", message });
+          } else if (key === DM_STREAM) {
+            hub.lastDmId = id;
+            if (fields.o === hub.instanceId) continue;
+            const dm = parseJson<DM>(fields.d);
+            if (dm) deliverDm(dm);
           } else if (key === TYPING_STREAM) {
             hub.lastTypingId = id;
             if (fields.o === hub.instanceId) continue;
@@ -290,6 +314,7 @@ async function startStream(): Promise<void> {
   for (const [key, field] of [
     [MSG_STREAM, "lastMsgId"],
     [TYPING_STREAM, "lastTypingId"],
+    [DM_STREAM, "lastDmId"],
   ] as const) {
     try {
       const tail = await redis.xrevrange(key, "+", "-", "COUNT", 1);
@@ -337,6 +362,7 @@ export function register(ws: WebSocket): void {
     connectionId: crypto.randomUUID(),
     clientId: "",
     name: "",
+    nick: "",
   });
   void startStream();
 }
@@ -470,4 +496,157 @@ export async function loadHistory(): Promise<Message[]> {
     console.error("[chat] loadHistory failed", err);
     return [];
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Private chat (DM) + nick + kontak                                    */
+/*   chat:nick:<nick>        STRING  hash(secret) pemilik nick           */
+/*   chat:contacts:<nick>    SET     nick kontak milik <nick>            */
+/*   chat:dm                 STREAM  relay lintas instance (transient)   */
+/*   chat:dmlog:<a>:<b>      STREAM  riwayat DM pasangan (a<b, urut abjad)*/
+/* ------------------------------------------------------------------ */
+
+// Fallback tanpa Redis (single instance, hilang saat restart).
+const memNicks = new Map<string, string>();
+const memContacts = new Map<string, Set<string>>();
+const memDmLog = new Map<string, DM[]>();
+
+const hashSecret = (s: string) => createHash("sha256").update(s).digest("hex");
+const pairKey = (a: string, b: string) => [a, b].sort().join(":");
+const normNick = (v: unknown) => clamp(v, 20).toLowerCase();
+
+async function nickExists(nick: string): Promise<boolean> {
+  try {
+    return redis ? (await redis.exists(`chat:nick:${nick}`)) === 1 : memNicks.has(nick);
+  } catch (err) {
+    console.error("[chat] nickExists failed", err);
+    return false;
+  }
+}
+
+async function listContacts(nick: string): Promise<string[]> {
+  try {
+    const list = redis
+      ? await redis.smembers(`chat:contacts:${nick}`)
+      : [...(memContacts.get(nick) ?? [])];
+    return list.sort();
+  } catch (err) {
+    console.error("[chat] listContacts failed", err);
+    return [];
+  }
+}
+
+/** Kirim DM ke semua socket lokal milik pengirim dan penerima. */
+function deliverDm(dm: DM): void {
+  for (const [ws, conn] of hub.conns) {
+    if (conn.nick && (conn.nick === dm.to || conn.nick === dm.from)) {
+      send(ws, { type: "dm", message: dm });
+    }
+  }
+}
+
+/**
+ * Klaim / masuk dengan nick. `secret` dibuat klien (simpan di localStorage):
+ * yang pertama klaim jadi pemilik, hanya secret yang sama yang bisa pakai lagi.
+ */
+export async function setNick(ws: WebSocket, rawNick: string, rawSecret: string): Promise<void> {
+  const conn = hub.conns.get(ws);
+  if (!conn) return;
+  const nick = normNick(rawNick);
+  const secret = clamp(rawSecret, 128);
+  if (!NICK_RE.test(nick) || secret.length < 8) {
+    send(ws, { type: "nick_error", reason: "invalid" });
+    return;
+  }
+  const h = hashSecret(secret);
+  let ok = false;
+  try {
+    if (!redis) {
+      const cur = memNicks.get(nick);
+      if (!cur) memNicks.set(nick, h);
+      ok = !cur || cur === h;
+    } else {
+      const key = `chat:nick:${nick}`;
+      ok = (await redis.set(key, h, "NX")) === "OK" || (await redis.get(key)) === h;
+    }
+  } catch (err) {
+    console.error("[chat] setNick failed", err);
+  }
+  if (!ok) {
+    send(ws, { type: "nick_error", reason: "taken" });
+    return;
+  }
+  conn.nick = nick;
+  send(ws, { type: "nick_ok", nick, contacts: await listContacts(nick) });
+}
+
+/** Tambah kontak berdasarkan nick (nick harus sudah terdaftar). */
+export async function addContact(ws: WebSocket, rawNick: string): Promise<void> {
+  const conn = hub.conns.get(ws);
+  if (!conn?.nick) return;
+  const other = normNick(rawNick);
+  if (other === conn.nick) {
+    send(ws, { type: "contact_error", reason: "self" });
+    return;
+  }
+  if (!NICK_RE.test(other) || !(await nickExists(other))) {
+    send(ws, { type: "contact_error", reason: "not_found" });
+    return;
+  }
+  try {
+    if (redis) await redis.sadd(`chat:contacts:${conn.nick}`, other);
+    else (memContacts.get(conn.nick) ?? memContacts.set(conn.nick, new Set()).get(conn.nick)!).add(other);
+  } catch (err) {
+    console.error("[chat] addContact failed", err);
+    return;
+  }
+  send(ws, { type: "contacts", contacts: await listContacts(conn.nick) });
+}
+
+/** Kirim pesan privat. Pengirim (`from`) selalu diambil dari koneksi, bukan klien. */
+export async function postDm(ws: WebSocket, rawTo: string, text: string): Promise<void> {
+  const conn = hub.conns.get(ws);
+  if (!conn?.nick) return;
+  const to = normNick(rawTo);
+  const clean = clamp(text, 2000);
+  if (!clean || to === conn.nick || !(await nickExists(to))) return;
+  const dm: DM = { id: crypto.randomUUID(), from: conn.nick, to, text: clean, ts: Date.now() };
+  deliverDm(dm); // lokal dulu
+  if (!redis) {
+    const k = pairKey(dm.from, dm.to);
+    const log = memDmLog.get(k) ?? [];
+    log.push(dm);
+    memDmLog.set(k, log.slice(-DMLOG_MAXLEN));
+    return;
+  }
+  try {
+    const d = JSON.stringify(dm);
+    await redis.xadd(DM_STREAM, "MAXLEN", "~", DM_MAXLEN, "*", "d", d, "o", hub.instanceId);
+    await redis.xadd(`chat:dmlog:${pairKey(dm.from, dm.to)}`, "MAXLEN", "~", DMLOG_MAXLEN, "*", "d", d);
+  } catch (err) {
+    console.error("[chat] dm xadd failed", err);
+  }
+}
+
+/** Kirim riwayat DM dengan satu nick ke pemintanya. */
+export async function loadDmHistory(ws: WebSocket, rawWith: string): Promise<void> {
+  const conn = hub.conns.get(ws);
+  if (!conn?.nick) return;
+  const other = normNick(rawWith);
+  if (!NICK_RE.test(other)) return;
+  let messages: DM[] = [];
+  try {
+    const k = pairKey(conn.nick, other);
+    if (!redis) messages = (memDmLog.get(k) ?? []).slice(-DM_HISTORY);
+    else {
+      const res = await redis.xrevrange(`chat:dmlog:${k}`, "+", "-", "COUNT", DM_HISTORY);
+      messages = res
+        .reverse()
+        .map(([, flat]) => parseJson<DM>(fieldsToObject(flat).d))
+        .filter((m): m is DM => m !== null);
+    }
+  } catch (err) {
+    console.error("[chat] loadDmHistory failed", err);
+  }
+  send(ws, { type: "dm_history", with: other, messages });
 }
