@@ -14,7 +14,7 @@ type Message = {
 
 type DM = { id: string; from: string; to: string; text: string; ts: number };
 
-type User = { clientId: string; nick: string; customStatus?: string };
+type User = { clientId: string; name: string; nick?: string; customStatus?: string };
 
 type PopupEvent = {
   id: string;
