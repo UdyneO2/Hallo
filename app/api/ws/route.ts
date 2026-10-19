@@ -68,13 +68,3 @@ export function GET() {
     ws.on('error', close);
   });
 }
-
-      }
-    });
-
-    const close = () => void unregister(ws);
-    ws.on('close', close);
-    // An error is always followed by a close, but clean up defensively.
-    ws.on('error', close);
-  });
-}
