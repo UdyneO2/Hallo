@@ -32,7 +32,9 @@ type ServerEvent =
   | { type: 'contacts'; contacts: string[] }
   | { type: 'contact_error'; reason: 'self' | 'not_found' }
   | { type: 'dm'; message: DM }
-  | { type: 'dm_history'; with: string; messages: DM[] };
+  | { type: 'dm_history'; with: string; messages: DM[] }
+  | { type: 'user_joined'; nick: string }
+  | { type: 'user_left'; nick: string };
 
 // Satu baris di daftar pesan (global atau DM), sudah dinormalisasi.
 type Row = {
