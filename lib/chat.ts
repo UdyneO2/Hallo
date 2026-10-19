@@ -497,10 +497,8 @@ export async function unregister(ws: WebSocket): Promise<void> {
   }
   await broadcastPresence(true);
   if (conn.nick) {
-      // [BARU] Panggil popup notifikasi saat user putus, alih-alih spam chat global
       await publishNotif("user_left", conn.nick);
     }
-}
   if (hub.conns.size === 0) stopStream();
 }
 
