@@ -3,17 +3,9 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import Avatar from 'boring-avatars';
 
-type Message = {
-  id: string;
-  kind: 'chat' | 'system';
-  clientId: string;
-  name: string;
-  text: string;
-  ts: number;
-};
-
-type DM = { id: string; from: string; to: string; text: string; ts: number };
-type User = { clientId: string; name: string; nick?: string; customStatus?: string };
+type Message = { id: string; kind: 'chat' | 'system'; clientId: string; name: string; text: string; ts: number; avatarUrl?: string };
+type DM = { id: string; from: string; to: string; text: string; ts: number; avatarUrl?: string };
+type User = { clientId: string; name: string; nick?: string; customStatus?: string; avatarUrl?: string };
 type PopupEvent = { id: string; message: string; status: 'online' | 'offline' };
 
 type ServerEvent =
@@ -30,22 +22,13 @@ type ServerEvent =
   | { type: 'user_joined'; nick: string }
   | { type: 'user_left'; nick: string };
 
-type Row = {
-  id: string;
-  kind: 'chat' | 'system';
-  seed: string;
-  name: string;
-  text: string;
-  mine: boolean;
-};
-
+type Row = { id: string; kind: 'chat' | 'system'; seed: string; name: string; text: string; mine: boolean; avatarUrl?: string };
 type Status = 'connecting' | 'online' | 'offline';
 
-// 1. LIMIT HISTORI MENJADI 50 PESAN
 const MAX_RENDERED = 50; 
 const TYPING_THROTTLE_MS = 2000;
 const TYPING_CLEAR_MS = 3000;
-const MAX_POPUPS = 3; // Limit notifikasi popup anti-spam
+const MAX_POPUPS = 3;
 
 function wsUrl(): string {
   if (typeof window === 'undefined') return '';
@@ -55,42 +38,39 @@ function wsUrl(): string {
 
 const chip = (on: boolean) =>
   `shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-    on
-      ? 'bg-blue-600 text-white'
-      : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700'
+    on ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700'
   }`;
 
-// Fungsi memutar suara ringan
 const playPopSound = () => {
   try {
     const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2354/2354-preview.mp3');
     audio.volume = 0.4;
-    audio.play().catch(() => {}); // catch agar tidak error jika browser memblokir auto-play
+    audio.play().catch(() => {}); 
   } catch (e) {}
 };
 
-export default function Chat({
-  clientId,
-  nick,
-  secret,
-  onLeave,
-  onNickError,
-}: {
-  clientId: string;
-  nick: string;
-  secret: string;
-  onLeave?: () => void;
-  onNickError?: (reason: 'invalid' | 'taken') => void;
-}) {
+// Komponen Helper untuk merender Custom Avatar URL atau Default Avatar
+const UserAvatar = ({ seed, url, size = 32 }: { seed: string, url?: string, size?: number }) => {
+  if (url && url.startsWith('http')) {
+    return (
+      <img src={url} alt={seed} style={{ width: size, height: size }} className="rounded-full object-cover ring-2 ring-white dark:ring-zinc-950 flex-shrink-0" />
+    );
+  }
+  return <span className="ring-2 ring-white dark:ring-zinc-950 rounded-full flex-shrink-0"><Avatar size={size} name={seed} variant="beam" /></span>;
+};
+
+export default function Chat({ clientId, nick, secret, onLeave, onNickError }: { clientId: string; nick: string; secret: string; onLeave?: () => void; onNickError?: (reason: 'invalid' | 'taken') => void; }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [count, setCount] = useState(0);
   const [status, setStatus] = useState<Status>('connecting');
   const [draft, setDraft] = useState('');
-  const [showProfile, setShowProfile] = useState(false);
-  const [myStatus, setMyStatus] = useState('sedang online');
   
-  // Fitur Lanjutan State
+  const [showProfile, setShowProfile] = useState(false);
+  // Persistensi Custom Status & Avatar Url
+  const [myStatus, setMyStatus] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('chat:status') || 'sedang online' : 'sedang online');
+  const [myAvatar, setMyAvatar] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('chat:avatar') || '' : '');
+  
   const [popups, setPopups] = useState<PopupEvent[]>([]);
   const [replyTo, setReplyTo] = useState<{name: string, text: string} | null>(null);
   const [showDmOptions, setShowDmOptions] = useState(false);
@@ -111,27 +91,18 @@ export default function Chat({
   const onNickErrorRef = useRef(onNickError);
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  // Update Title Tab Browser untuk Unread Messages
   useEffect(() => {
     const totalUnread = Object.values(unread).reduce((a, b) => a + b, 0);
-    document.title = totalUnread > 0 ? `(${totalUnread}) Pesan Baru - Chat` : 'Chat Application';
+    document.title = totalUnread > 0 ? `(${totalUnread}) Pesan Baru` : 'Chat App';
   }, [unread]);
 
   const showPopup = (message: string, userStatus: 'online' | 'offline') => {
     const id = Math.random().toString(36).substring(2, 9);
-    setPopups((prev) => {
-      // Membatasi popup tidak boleh dari MAX_POPUPS
-      const next = [...(prev || []), { id, message, status: userStatus }];
-      return next.slice(-MAX_POPUPS);
-    });
-    setTimeout(() => {
-      setPopups((prev) => (prev || []).filter((p) => p && p.id !== id));
-    }, 3500);
+    setPopups((prev) => [...(prev || []), { id, message, status: userStatus }].slice(-MAX_POPUPS));
+    setTimeout(() => { setPopups((prev) => (prev || []).filter((p) => p && p.id !== id)); }, 3500);
   };
 
-  useEffect(() => {
-    onNickErrorRef.current = onNickError;
-  }, [onNickError]);
+  useEffect(() => { onNickErrorRef.current = onNickError; }, [onNickError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -153,9 +124,9 @@ export default function Chat({
         try {
           socket.send(JSON.stringify({ type: 'join', clientId, name: nick })); 
           socket.send(JSON.stringify({ type: 'setNick', nick, secret }));
-          if (activeRef.current) {
-            socket.send(JSON.stringify({ type: 'dmHistory', with: activeRef.current }));
-          }
+          // Kirim status & avatar yang tersimpan di localStorage agar server tahu kita refresh
+          socket.send(JSON.stringify({ type: 'setStatus', status: myStatus, avatarUrl: myAvatar }));
+          if (activeRef.current) socket.send(JSON.stringify({ type: 'dmHistory', with: activeRef.current }));
         } catch (err) {}
       });
 
@@ -178,7 +149,7 @@ export default function Chat({
               if (data.message && data.message.id) {
                 setMessages((prev) => [...(prev || []), data.message].slice(-MAX_RENDERED));
                 const sender = data.message.clientId;
-                if (sender !== clientId) playPopSound(); // Bunyikan notif
+                if (sender !== clientId) playPopSound(); 
                 if (sender) {
                   const pending = timers.get(sender);
                   if (pending) { clearTimeout(pending); timers.delete(sender); }
@@ -201,16 +172,13 @@ export default function Chat({
                 setTyping((prev) => ({ ...prev, [who]: whoName || 'anon' }));
                 const existing = timers.get(who);
                 if (existing) clearTimeout(existing);
-                timers.set(
-                  who,
-                  setTimeout(() => {
-                    timers.delete(who);
-                    setTyping((prev) => {
-                      if (!prev) return prev;
-                      const next = { ...prev }; delete next[who]; return next;
-                    });
-                  }, TYPING_CLEAR_MS),
-                );
+                timers.set(who, setTimeout(() => {
+                  timers.delete(who);
+                  setTyping((prev) => {
+                    if (!prev) return prev;
+                    const next = { ...prev }; delete next[who]; return next;
+                  });
+                }, TYPING_CLEAR_MS));
               }
               break;
             }
@@ -231,7 +199,7 @@ export default function Chat({
               if (data.message && data.message.id) {
                 const m = data.message;
                 const other = m.from === nick ? m.to : m.from;
-                if (m.from !== nick) playPopSound(); // Bunyikan notif
+                if (m.from !== nick) playPopSound(); 
                 setDms((prev) => {
                   const safePrev = prev || {};
                   return { ...safePrev, [other]: [...(safePrev[other] ?? []), m].slice(-MAX_RENDERED) };
@@ -255,9 +223,7 @@ export default function Chat({
               }
               break;
           }
-        } catch (err: any) {
-          console.error("[WebSocket Error]:", err);
-        }
+        } catch (err: any) { console.error(err); }
       });
 
       socket.addEventListener('close', () => {
@@ -278,20 +244,26 @@ export default function Chat({
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [clientId, nick, secret]);
+  }, [clientId, nick, secret, myStatus, myAvatar]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, typing, dms, active]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, typing, dms, active]);
 
   const updateStatus = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const newStatus = fd.get('status') as string;
+    const newAvatar = fd.get('avatarUrl') as string;
     const cleanStatus = newStatus || 'sedang online';
+    const cleanAvatar = newAvatar || '';
+    
+    // Simpan ke memori lokal browser agar tetap ada saat refresh
+    localStorage.setItem('chat:status', cleanStatus);
+    localStorage.setItem('chat:avatar', cleanAvatar);
+    
     setMyStatus(cleanStatus);
+    setMyAvatar(cleanAvatar);
     setShowProfile(false); 
-    sendJson({ type: 'setStatus', status: cleanStatus }); 
+    sendJson({ type: 'setStatus', status: cleanStatus, avatarUrl: cleanAvatar }); 
   };
 
   const sendJson = (payload: object): boolean => {
@@ -315,7 +287,7 @@ export default function Chat({
     }
   };
 
-  // FUNGSI OPSI DM: Bersihkan Riwayat & Tutup Tab
+  // FUNGSI DM DIPERBAIKI
   const clearDmHistory = () => {
     if (active) setDms((prev) => ({ ...prev, [active]: [] }));
     setShowDmOptions(false);
@@ -323,9 +295,9 @@ export default function Chat({
 
   const closeActiveDm = () => {
     if (active) {
-      setContacts((prev) => prev.filter(c => c !== active));
-      setActive(null);
-      activeRef.current = null;
+      const toRemove = active;
+      selectChat(null); // Memaksa pindah layar ke global
+      setContacts((prev) => prev.filter(c => c !== toRemove)); // Hapus dari tab kontak
       setShowDmOptions(false);
     }
   };
@@ -354,7 +326,6 @@ export default function Chat({
     let finalDraft = draft.trim();
     if (!finalDraft) return;
 
-    // Menempelkan quote reply ke pesan jika sedang mereply
     if (replyTo) {
       finalDraft = `> ${replyTo.name}:\n> ${replyTo.text}\n\n${finalDraft}`;
       setReplyTo(null);
@@ -369,7 +340,6 @@ export default function Chat({
     lastTypingSent.current = 0;
   };
 
-  // Helper untuk merender Quote Balasan (Reply Blockquote)
   const renderMessageText = (text: string) => {
     const lines = text.split('\n');
     return lines.map((line, i) => {
@@ -417,16 +387,16 @@ export default function Chat({
   const rows: Row[] = active
     ? safeDms.filter(Boolean).map((m) => ({
         id: m.id || Math.random().toString(), kind: 'chat' as const, seed: m.from || 'anon',
-        name: m.from || 'anon', text: m.text || '', mine: m.from === nick,
+        name: m.from || 'anon', text: m.text || '', mine: m.from === nick, avatarUrl: m.avatarUrl
       }))
     : safeMessages.filter(Boolean).map((m) => ({
         id: m.id || Math.random().toString(), kind: m.kind || 'chat', seed: m.clientId || 'anon',
-        name: m.name || m.clientId || 'anon', text: m.text || '', mine: m.clientId === clientId,
+        name: m.name || m.clientId || 'anon', text: m.text || '', mine: m.clientId === clientId, avatarUrl: m.avatarUrl
       }));
 
-  // Cari data status khusus untuk header DM aktif
   const activeUserObj = active ? users.find((u) => u.nick === active || u.name === active) : null;
   const isOpponentOnline = !!activeUserObj;
+  const onlineCount = status === 'online' ? Math.max(count, 1) : count;
 
   return (
     <div className="flex flex-1 w-full max-w-2xl flex-col relative">
@@ -444,12 +414,16 @@ export default function Chat({
       {showProfile && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-zinc-900 rounded-2xl w-full max-w-xs p-6 flex flex-col items-center shadow-xl">
-            <Avatar size={72} name={clientId || 'anon'} variant="beam" />
+            <UserAvatar seed={clientId} url={myAvatar} size={72} />
             <h2 className="mt-4 text-lg font-bold">@{nick || 'anon'}</h2>
             <form onSubmit={updateStatus} className="w-full mt-4 flex flex-col gap-3">
               <div>
                 <label className="text-xs text-zinc-500 mb-1 block">Status Profil</label>
                 <input name="status" defaultValue={myStatus} placeholder="Mis: Sedang makan..." maxLength={40} className="w-full rounded-lg border border-black/10 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/15" />
+              </div>
+              <div>
+                <label className="text-xs text-zinc-500 mb-1 block">Link Avatar Custom (Opsional)</label>
+                <input name="avatarUrl" defaultValue={myAvatar} placeholder="http://... .jpg/.gif" className="w-full rounded-lg border border-black/10 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/15" />
               </div>
               <div className="flex gap-2 mt-2">
                 <button type="button" onClick={() => setShowProfile(false)} className="flex-1 py-2 text-sm text-zinc-600 bg-zinc-100 dark:bg-zinc-800 rounded-lg">Batal</button>
@@ -460,12 +434,11 @@ export default function Chat({
         </div>
       )}
 
-      {/* HEADER DINAMIS (GLOBAL vs DM) */}
       <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-black/10 bg-white px-4 py-3 dark:border-white/15 dark:bg-zinc-950">
         <div className="flex items-center gap-3">
           {active ? (
             <div className="flex items-center gap-3">
-               <Avatar size={32} name={active} variant="beam" />
+               <UserAvatar seed={active} url={activeUserObj?.avatarUrl} size={32} />
                <div className="flex flex-col">
                  <span className="text-sm font-bold leading-none">@{active}</span>
                  <span className={`text-[10px] mt-1 truncate max-w-[150px] font-medium ${isOpponentOnline ? 'text-green-500' : 'text-zinc-400'}`}>
@@ -475,7 +448,7 @@ export default function Chat({
             </div>
           ) : (
             <button onClick={() => setShowProfile(true)} className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left">
-              <Avatar size={32} name={clientId || 'anon'} variant="beam" />
+              <UserAvatar seed={clientId} url={myAvatar} size={32} />
               <div className="flex flex-col">
                 <span className="text-sm font-bold leading-none">@{nick || 'anon'}</span>
                 <span className="text-[10px] text-zinc-500 mt-1 truncate max-w-[100px]">{myStatus}</span>
@@ -497,12 +470,15 @@ export default function Chat({
             </div>
           ) : (
             <div className="flex items-center gap-3">
-              <div className="flex -space-x-2">
-                {(users || []).filter(Boolean).slice(0, 5).map((user) => (
-                  <span key={user.clientId || Math.random().toString()} title={`@${user.nick || user.name || 'anon'} - ${user.customStatus || 'sedang online'}`} className="inline-flex rounded-full ring-2 ring-white dark:ring-zinc-950">
-                    <Avatar size={24} name={user.clientId || 'anon'} variant="beam" />
-                  </span>
-                ))}
+              <div className="flex flex-col items-end">
+                <div className="flex -space-x-2">
+                  {(users || []).filter(Boolean).slice(0, 5).map((user) => (
+                    <span key={user.clientId || Math.random().toString()} title={`@${user.nick || user.name || 'anon'} - ${user.customStatus || 'sedang online'}`}>
+                      <UserAvatar seed={user.clientId || 'anon'} url={user.avatarUrl} size={24} />
+                    </span>
+                  ))}
+                </div>
+                <span className="text-[10px] text-green-500 font-bold mt-1 pr-1 tracking-tight">{onlineCount} Online</span>
               </div>
               {onLeave && <button onClick={onLeave} className="text-xs text-red-500 hover:underline">Keluar</button>}
             </div>
@@ -520,11 +496,14 @@ export default function Chat({
         ))}
       </nav>
 
-      <form onSubmit={addContact} className="flex items-center gap-2 border-b border-black/10 px-4 py-2 dark:border-white/15">
-        <input value={contactInput} onChange={(event) => setContactInput(event.target.value)} placeholder="Tambah kontak DM (nick)" autoCapitalize="none" autoCorrect="off" className="min-w-0 flex-1 rounded-full border border-black/10 bg-transparent px-3 py-1.5 text-xs outline-none focus:border-blue-500 dark:border-white/15" />
-        <button type="submit" disabled={status !== 'online' || !contactInput.trim()} className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900">Tambah</button>
-      </form>
-      {contactError && <p className="px-4 pt-1 text-xs text-red-500">{contactError}</p>}
+      {/* Sembunyikan Form Tambah Kontak saat berada di dalam DM */}
+      {!active && (
+        <form onSubmit={addContact} className="flex items-center gap-2 border-b border-black/10 px-4 py-2 dark:border-white/15">
+          <input value={contactInput} onChange={(event) => setContactInput(event.target.value)} placeholder="Tambah kontak DM (nick)" autoCapitalize="none" autoCorrect="off" className="min-w-0 flex-1 rounded-full border border-black/10 bg-transparent px-3 py-1.5 text-xs outline-none focus:border-blue-500 dark:border-white/15" />
+          <button type="submit" disabled={status !== 'online' || !contactInput.trim()} className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900">Tambah</button>
+        </form>
+      )}
+      {!active && contactError && <p className="px-4 pt-1 text-xs text-red-500">{contactError}</p>}
 
       <ol className="flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4 scroll-smooth">
         {active && rows.length === 0 && <li className="self-center text-xs text-zinc-400 dark:text-zinc-500 mt-10">Belum ada obrolan dengan @{active}. Mulai sapa!</li>}
@@ -533,7 +512,9 @@ export default function Chat({
           
           return (
             <li key={row.id} className={`group flex items-end gap-2 ${row.mine ? 'flex-row-reverse' : 'flex-row'}`}>
-              <span className="shrink-0"><Avatar size={28} name={row.seed || 'anon'} variant="beam" /></span>
+              <span className="shrink-0">
+                 <UserAvatar seed={row.seed || 'anon'} url={row.mine ? myAvatar : row.avatarUrl} size={28} />
+              </span>
               
               <div className={`flex min-w-0 max-w-[75%] flex-col ${row.mine ? 'items-end' : 'items-start'}`}>
                 <span className="px-1 text-[11px] text-zinc-400 dark:text-zinc-500 mb-0.5">{row.mine ? 'Kamu' : `@${row.name || 'anon'}`}</span>
@@ -542,13 +523,11 @@ export default function Chat({
                     {renderMessageText(row.text)}
                   </span>
                   
-                  {/* Tombol Reply Muncul saat dihover */}
                   <button onClick={() => setReplyTo({name: row.name || 'anon', text: row.text})} title="Balas" className="opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-blue-500 transition-opacity text-lg px-1">
                     ↩
                   </button>
                 </div>
 
-                {/* INDIKATOR STATUS PESAN DM (Centang) */}
                 {row.mine && active && (
                   <span className="text-[10px] pr-1 mt-0.5 flex items-center">
                     {status === 'offline' ? (
@@ -570,7 +549,6 @@ export default function Chat({
       <div className="h-5 px-4 text-xs font-medium text-blue-500" aria-live="polite">{typingLabel}</div>
 
       <div className="border-t border-black/10 dark:border-white/15 bg-white dark:bg-zinc-950 px-3 py-3">
-        {/* Box Preview Reply */}
         {replyTo && (
           <div className="mb-2 flex items-center justify-between bg-zinc-100 dark:bg-zinc-800 p-2 rounded-lg border-l-4 border-blue-500">
             <div className="flex flex-col min-w-0">
