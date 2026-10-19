@@ -8,26 +8,23 @@ import {
   postTyping,
   register,
   setNick,
+  setStatus, // [BARU] Import fungsi setStatus
   unregister,
 } from '@/lib/chat';
 
 // Wire-format the client sends over the socket.
 type ClientEvent =
-  | { type: 'join'; clientId: string; name: string }
+  | { type: 'join'; clientId: string; name: string } // name di sini akan diisi oleh nick dari frontend
   | { type: 'message'; text: string }
   | { type: 'typing' }
   | { type: 'setNick'; nick: string; secret: string }
   | { type: 'addContact'; nick: string }
   | { type: 'dm'; to: string; text: string }
-  | { type: 'dmHistory'; with: string };
+  | { type: 'dmHistory'; with: string }
+  | { type: 'setStatus'; status: string }; // [BARU] Tambahkan tipe setStatus
 
-// A WebSocket connection starts as a GET request with an `Upgrade` header.
-// `experimental_upgradeWebSocket` performs the upgrade and hands us the socket.
-// See https://vercel.com/docs/functions/functions-api-reference/vercel-functions-package#experimental_upgradewebsocket
 export function GET() {
   return experimental_upgradeWebSocket((ws) => {
-    // Register and attach listeners synchronously (no await before this), so a
-    // `join` frame sent immediately on open is never dropped.
     register(ws);
 
     ws.on('message', (data: WebSocketData) => {
@@ -35,7 +32,7 @@ export function GET() {
       try {
         event = JSON.parse(data.toString());
       } catch {
-        return; // ignore non-JSON frames
+        return; 
       }
 
       switch (event.type) {
@@ -60,6 +57,18 @@ export function GET() {
         case 'dmHistory':
           void loadDmHistory(ws, event.with);
           break;
+        case 'setStatus': // [BARU] Handler untuk menangani update status profil
+          void setStatus(ws, event.status);
+          break;
+      }
+    });
+
+    const close = () => void unregister(ws);
+    ws.on('close', close);
+    ws.on('error', close);
+  });
+}
+
       }
     });
 
