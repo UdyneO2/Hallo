@@ -35,9 +35,8 @@ export type Message = {
   ts: number;
 };
 
-export type User = { clientId: string; name: string };
+export type User = { clientId: string; name: string; customStatus?: string };
 
-// Pesan privat (DM) antar nick.
 export type DM = { id: string; from: string; to: string; text: string; ts: number };
 
 type ServerEvent =
@@ -50,13 +49,17 @@ type ServerEvent =
   | { type: "contacts"; contacts: string[] }
   | { type: "contact_error"; reason: "self" | "not_found" }
   | { type: "dm"; message: DM }
-  | { type: "dm_history"; with: string; messages: DM[] };
+  | { type: "dm_history"; with: string; messages: DM[] }
+  | { type: "user_joined"; nick: string }
+  | { type: "user_left"; nick: string };
+
 
 const CONNS_KEY = "chat:conns"; // ZSET connectionId -> lastSeen ms
 const META_KEY = "chat:connmeta"; // HASH connectionId -> { clientId, name }
 const MSG_STREAM = "chat:messages"; // durable message log + cross-instance relay
 const TYPING_STREAM = "chat:typing"; // transient typing relay
 const DM_STREAM = "chat:dm"; // relay DM lintas instance
+const NOTIF_STREAM = "chat:notifs";
 const DM_MAXLEN = 500;
 const DMLOG_MAXLEN = 100; // riwayat per pasangan nick
 const DM_HISTORY = 50;
@@ -67,11 +70,12 @@ const HEARTBEAT_MS = 10_000; // how often we refresh our local connections
 const PRESENCE_MS = 3_000; // how often we recompute + broadcast presence
 const BLOCK_MS = 5_000; // XREAD BLOCK timeout — wakes the loop to observe shutdown
 const MSG_MAXLEN = 200; // cap the message stream
-const TYPING_MAXLEN = 50; // cap the typing stream
+const TYPING_MAXLEN = 50;
+const NOTIF_MAXLEN = 50; // cap the typing stream
 const HISTORY = 50; // messages replayed to a newly-joined client
 
-type ConnMeta = { clientId: string; name: string };
-type Conn = { connectionId: string; clientId: string; name: string; nick: string };
+type ConnMeta = { clientId: string; name: string; customStatus?: string };
+type Conn = { connectionId: string; clientId: string; name: string; nick: string; customStatus?: string };
 type StreamFields = { d: string; o: string };
 
 type Hub = {
@@ -84,6 +88,7 @@ type Hub = {
   presence: ReturnType<typeof setInterval> | null;
   streamClient: Redis | null; // TCP client running the blocking read loop
   streaming: boolean; // is the read loop currently active?
+  lastNotifId: string;
   lastPresence: string; // serialized last-broadcast presence, for change detection
 };
 
@@ -98,6 +103,7 @@ const hub: Hub =
     lastMsgId: "0-0",
     lastTypingId: "0-0",
     lastDmId: "0-0",
+    lastNotifId: "0-0",
     heartbeat: null,
     presence: null,
     streamClient: null,
@@ -142,6 +148,7 @@ async function touch(conn: Conn): Promise<void> {
       JSON.stringify({
         clientId: conn.clientId,
         name: conn.name,
+        customStatus: conn.customStatus || "sedang online",
       } satisfies ConnMeta),
     );
   } catch (err) {
@@ -156,7 +163,7 @@ async function computePresence(): Promise<{ count: number; users: User[] }> {
   if (!redis) {
     for (const conn of hub.conns.values()) {
       if (conn.clientId)
-        seen.set(conn.clientId, { clientId: conn.clientId, name: conn.name });
+        seen.set(conn.clientId, { clientId: conn.clientId, name: conn.name, customStatus: conn.customStatus || "sedang online" });
     }
     return { count: seen.size, users: [...seen.values()] };
   }
@@ -180,6 +187,7 @@ async function computePresence(): Promise<{ count: number; users: User[] }> {
         seen.set(entry.clientId, {
           clientId: entry.clientId,
           name: entry.name,
+          customStatus: entry.customStatus || "sedang online",
         });
       }
     }
@@ -242,9 +250,11 @@ async function runReadLoop(): Promise<void> {
         MSG_STREAM,
         TYPING_STREAM,
         DM_STREAM,
+        NOTIF_STREAM,
         hub.lastMsgId,
         hub.lastTypingId,
         hub.lastDmId,
+        hub.lastNotifId,
       )) as Array<[string, Array<[string, string[]]>]> | null;
 
       if (!res) continue; // BLOCK timed out with no new entries
@@ -273,6 +283,12 @@ async function runReadLoop(): Promise<void> {
                 name: typing.name,
               });
             }
+          } else if (key === NOTIF_STREAM) {
+            // [BARU] Handler stream notifikasi join/leave
+            hub.lastNotifId = id;
+            if (fields.o === hub.instanceId) continue;
+            const notif = parseJson<{type: "user_joined" | "user_left"; nick: string}>(fields.d);
+            if (notif) broadcast(notif);
           }
         }
       }
@@ -315,6 +331,7 @@ async function startStream(): Promise<void> {
     [MSG_STREAM, "lastMsgId"],
     [TYPING_STREAM, "lastTypingId"],
     [DM_STREAM, "lastDmId"],
+    [NOTIF_STREAM, "lastNotifId"], 
   ] as const) {
     try {
       const tail = await redis.xrevrange(key, "+", "-", "COUNT", 1);
@@ -363,6 +380,7 @@ export function register(ws: WebSocket): void {
     clientId: "",
     name: "",
     nick: "",
+    customStatus: "sedang online",
   });
   void startStream();
 }
@@ -379,13 +397,19 @@ export async function join(
   const nm = clamp(name, 40) || "anon";
   // Only announce if this user isn't already connected elsewhere (other tab or
   // instance), so reconnects/extra tabs don't spam "joined".
-  const alreadyOnline = await isOnline(cid);
   conn.clientId = cid;
   conn.name = nm;
   await touch(conn);
   send(ws, { type: "history", messages: await loadHistory() });
   await broadcastPresence(true);
-  if (!alreadyOnline) await postSystem(`${nm} joined`);
+}
+export async function setStatus(ws: WebSocket, status: string): Promise<void> {
+  const conn = hub.conns.get(ws);
+  if (!conn) return;
+  const cleanStatus = clamp(status, 60, "sedang online");
+  conn.customStatus = cleanStatus;
+  await touch(conn);
+  await broadcastPresence(true); // Sebar update status ke semua orang
 }
 
 /** Publish a chat message: deliver locally now, persist + fan out via the stream. */
@@ -403,18 +427,6 @@ export async function postMessage(ws: WebSocket, text: string): Promise<void> {
     ts: Date.now(),
   };
   await publishMessage(message);
-}
-
-/** Publish a system notice (e.g. "X joined") to everyone, including history. */
-async function postSystem(text: string): Promise<void> {
-  await publishMessage({
-    id: crypto.randomUUID(),
-    kind: "system",
-    clientId: "",
-    name: "system",
-    text,
-    ts: Date.now(),
-  });
 }
 
 /** Deliver a message to local sockets now, then persist + fan out via the stream. */
@@ -461,6 +473,15 @@ export async function postTyping(ws: WebSocket): Promise<void> {
     console.error("[chat] typing xadd failed", err);
   }
 }
+async function publishNotif(type: "user_joined" | "user_left", nick: string): Promise<void> {
+  broadcast({ type, nick }); // Tembak ke koneksi lokal instance ini
+  if (!redis) return;
+  try {
+    await redis.xadd(NOTIF_STREAM, "MAXLEN", "~", NOTIF_MAXLEN, "*", "d", JSON.stringify({ type, nick }), "o", hub.instanceId);
+  } catch (err) {
+    console.error("[chat] notif xadd failed", err);
+  }
+}
 
 /** Remove a closed socket and announce the updated presence. */
 export async function unregister(ws: WebSocket): Promise<void> {
@@ -475,10 +496,11 @@ export async function unregister(ws: WebSocket): Promise<void> {
     }
   }
   await broadcastPresence(true);
-  // Announce a leave only once this user has no remaining connections anywhere.
-  if (conn?.clientId && !(await isOnline(conn.clientId))) {
-    await postSystem(`${conn.name} left`);
-  }
+  if (conn.nick) {
+      // [BARU] Panggil popup notifikasi saat user putus, alih-alih spam chat global
+      await publishNotif("user_left", conn.nick);
+    }
+}
   if (hub.conns.size === 0) stopStream();
 }
 
@@ -578,6 +600,8 @@ export async function setNick(ws: WebSocket, rawNick: string, rawSecret: string)
   }
   conn.nick = nick;
   send(ws, { type: "nick_ok", nick, contacts: await listContacts(nick) });
+}
+await publishNotif("user_joined", nick);
 }
 
 /** Tambah kontak berdasarkan nick (nick harus sudah terdaftar). */
