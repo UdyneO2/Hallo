@@ -14,7 +14,13 @@ type Message = {
 
 type DM = { id: string; from: string; to: string; text: string; ts: number };
 
-type User = { clientId: string; name: string };
+type User = { clientId: string; nick: string; customStatus?: string };
+
+type PopupEvent = {
+  id: string;
+  message: string;
+  status: 'online' | 'offline';
+};
 
 type ServerEvent =
   | { type: 'history'; messages: Message[] }
@@ -58,14 +64,12 @@ const chip = (on: boolean) =>
 
 export default function Chat({
   clientId,
-  name,
   nick,
   secret,
   onLeave,
   onNickError,
 }: {
   clientId: string;
-  name: string;
   nick: string;
   secret: string;
   onLeave?: () => void;
@@ -74,8 +78,20 @@ export default function Chat({
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [count, setCount] = useState(0);
-  const [status, setStatus] = useState<Status>('connecting');
+  const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting');
   const [draft, setDraft] = useState('');
+  const [showProfile, setShowProfile] = useState(false);
+  const [myStatus, setMyStatus] = useState('sedang online');
+  const [popups, setPopups] = useState<PopupEvent[]>([]);
+  
+  const showPopup = (message: string, userStatus: 'online' | 'offline') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setPopups((prev) => [...prev, { id, message, status: userStatus }]);
+    setTimeout(() => {
+      setPopups((prev) => prev.filter((p) => p.id !== id));
+    }, 3000);
+  };
+
   // Map of other people currently typing: clientId -> display name.
   const [typing, setTyping] = useState<Record<string, string>>({});
 
@@ -114,7 +130,7 @@ export default function Chat({
       socket.addEventListener('open', () => {
         reconnectDelay = 1000;
         setStatus('online');
-        socket.send(JSON.stringify({ type: 'join', clientId, name }));
+        socket.send(JSON.stringify({ type: 'join', clientId, name: nick })); 
         socket.send(JSON.stringify({ type: 'setNick', nick, secret }));
         // Setelah reconnect, muat ulang riwayat DM yang sedang dibuka.
         if (activeRef.current) {
@@ -131,6 +147,14 @@ export default function Chat({
         }
 
         switch (data.type) {
+          case 'user_joined':
+            if (data.nick !== nick) {
+              showPopup(`@${data.nick} bergabung`, 'online');
+            }
+            break;
+          case 'user_left':
+            showPopup(`@${data.nick} keluar`, 'offline');
+            break;
           case 'history':
             setMessages(data.messages.slice(-MAX_RENDERED));
             break;
@@ -232,12 +256,45 @@ export default function Chat({
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [clientId, name, nick, secret]);
+  }, [clientId, nick, secret]);
+
+  if (status === 'connecting') {
+    return (
+      <div className="flex flex-1 w-full flex-col items-center justify-center bg-white dark:bg-zinc-950">
+        <style>{`
+          @keyframes loadingBar {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+          }
+        `}</style>
+        <h2 className="text-2xl font-bold mb-6 text-zinc-800 dark:text-zinc-100 animate-pulse">
+          Hallo?
+        </h2>
+        {/* Animated Progress Bar */}
+        <div className="w-48 h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden relative">
+          <div 
+            className="absolute top-0 bottom-0 left-0 w-1/2 bg-blue-600 rounded-full"
+            style={{ animation: 'loadingBar 1.2s infinite ease-in-out' }}
+          />
+        </div>
+        <p className="mt-4 text-xs text-zinc-400">Menghubungkan ke server...</p>
+      </div>
+    );
+  }
 
   // Auto-scroll to the newest message.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typing, dms, active]);
+
+  const updateStatus = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const newStatus = fd.get('status') as string;
+    setMyStatus(newStatus || 'sedang online');
+    setShowProfile(false); // Tutup profil
+    sendJson({ type: 'setStatus', status: newStatus || 'sedang online' }); // Aktifkan jika server sudah siap
+  };
 
   const sendJson = (payload: object): boolean => {
     const socket = socketRef.current;
@@ -329,47 +386,63 @@ export default function Chat({
 
   return (
     <div className="flex flex-1 w-full max-w-2xl flex-col">
-      <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-black/10 bg-white px-4 py-3 dark:border-white/15 dark:bg-zinc-950">
-        <h1 className="text-sm font-semibold tracking-tight">
-          {active ? `@${active}` : 'Global chat'}
-        </h1>
-        <div className="flex items-center gap-3">
-          {/* Stacked avatars of everyone online. */}
-          <div className="flex -space-x-2">
-            {users.slice(0, 5).map((user) => (
-              <span
-                key={user.clientId}
-                title={user.name}
-                className="inline-flex rounded-full ring-2 ring-white dark:ring-zinc-950"
-              >
-                <Avatar size={24} name={user.clientId} variant="beam" />
-              </span>
-            ))}
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none">
+        {popups.map((popup) => (
+          <div
+            key={popup.id}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full shadow-md text-[11px] font-medium transition-all duration-300 transform scale-100 opacity-100 ${
+              popup.status === 'online' ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-zinc-100 text-zinc-600 border border-zinc-200'
+            }`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${popup.status === 'online' ? 'bg-green-500' : 'bg-zinc-400'}`} />
+            {popup.message}
           </div>
-          <span className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-            <span
-              className={`inline-block h-2 w-2 rounded-full ${
-                status === 'online'
-                  ? 'bg-green-500'
-                  : status === 'connecting'
-                    ? 'bg-amber-500'
-                    : 'bg-red-500'
-              }`}
-            />
-            {onlineCount} {onlineCount === 1 ? 'person' : 'people'} online
-          </span>
+        ))}
+      </div>
+      {showProfile && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white dark:bg-zinc-900 rounded-2xl w-full max-w-xs p-6 flex flex-col items-center shadow-xl">
+            <Avatar size={72} name={clientId} variant="beam" />
+            <h2 className="mt-4 text-lg font-bold">@{nick}</h2>
+            <form onSubmit={updateStatus} className="w-full mt-4 flex flex-col gap-3">
+              <div>
+                <label className="text-xs text-zinc-500 mb-1 block">Status Profil</label>
+                <input 
+                  name="status"
+                  defaultValue={myStatus}
+                  placeholder="Mis: Sedang makan..."
+                  className="w-full rounded-lg border border-black/10 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/15"
+                />
+              </div>
+              <div className="flex gap-2 mt-2">
+                <button type="button" onClick={() => setShowProfile(false)} className="flex-1 py-2 text-sm text-zinc-600 bg-zinc-100 dark:bg-zinc-800 rounded-lg">Batal</button>
+                <button type="submit" className="flex-1 py-2 text-sm text-white bg-blue-600 rounded-lg font-medium">Simpan</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-black/10 bg-white px-4 py-3 dark:border-white/15 dark:bg-zinc-950">
+      <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-black/10 bg-white px-4 py-3 dark:border-white/15 dark:bg-zinc-950">
+        <div className="flex items-center gap-3">
+          <button onClick={() => setShowProfile(true)} className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left">
+            <Avatar size={32} name={clientId} variant="beam" />
+            <div className="flex flex-col">
+              <span className="text-sm font-bold leading-none">@{nick}</span>
+              <span className="text-[10px] text-zinc-500 mt-1 truncate max-w-[100px]">{myStatus}</span>
+            </div>
+          </button>
+        </div>
+        
+        <div className="flex items-center gap-3">
+          {/* Sisa UI (Indicator Online, Leave Button) */}
           {onLeave && (
-            <button
-              type="button"
-              onClick={onLeave}
-              className="text-xs text-zinc-500 underline underline-offset-2 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
-            >
-              leave
+            <button onClick={onLeave} className="text-xs text-red-500 hover:underline">
+              Keluar
             </button>
           )}
         </div>
       </header>
-
       {/* Tab chat: Global + kontak (scroll horizontal di HP). */}
       <nav
         className="flex items-center gap-2 overflow-x-auto border-b border-black/10 px-4 py-2 dark:border-white/15"
