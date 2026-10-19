@@ -14,6 +14,7 @@ type Message = {
 
 type DM = { id: string; from: string; to: string; text: string; ts: number };
 
+// Tipe User DIPERBAIKI: Mengakomodasi format 'name' dan 'nick'
 type User = { clientId: string; name: string; nick?: string; customStatus?: string };
 
 type PopupEvent = {
@@ -48,11 +49,10 @@ type Row = {
 type Status = 'connecting' | 'online' | 'offline';
 
 const MAX_RENDERED = 200;
-const TYPING_THROTTLE_MS = 2000; 
-const TYPING_CLEAR_MS = 3000; 
+const TYPING_THROTTLE_MS = 2000;
+const TYPING_CLEAR_MS = 3000;
 
 function wsUrl(): string {
-  // Tambahan pelindung agar aman saat SSR Next.js
   if (typeof window === 'undefined') return '';
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${protocol}://${window.location.host}/api/ws`;
@@ -89,14 +89,13 @@ export default function Chat({
   
   const showPopup = (message: string, userStatus: 'online' | 'offline') => {
     const id = Math.random().toString(36).substring(2, 9);
-    setPopups((prev) => [...prev, { id, message, status: userStatus }]);
+    setPopups((prev) => [...(prev || []), { id, message, status: userStatus }]);
     setTimeout(() => {
-      setPopups((prev) => prev.filter((p) => p.id !== id));
+      setPopups((prev) => (prev || []).filter((p) => p && p.id !== id));
     }, 3000);
   };
 
   const [typing, setTyping] = useState<Record<string, string>>({});
-
   const [contacts, setContacts] = useState<string[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [dms, setDms] = useState<Record<string, DM[]>>({});
@@ -105,7 +104,7 @@ export default function Chat({
   const [contactError, setContactError] = useState('');
 
   const socketRef = useRef<WebSocket | null>(null);
-  const bottomRef = useRef<HTMLLIElement | null>(null); // Ubah ke HTMLLIElement agar valid di ol
+  const bottomRef = useRef<HTMLLIElement | null>(null);
   const lastTypingSent = useRef(0);
   const activeRef = useRef<string | null>(null);
   const onNickErrorRef = useRef(onNickError);
@@ -147,40 +146,46 @@ export default function Chat({
 
         switch (data.type) {
           case 'user_joined':
-            if (data.nick !== nick) {
+            if (data.nick && data.nick !== nick) {
               showPopup(`@${data.nick} bergabung`, 'online');
             }
             break;
           case 'user_left':
-            showPopup(`@${data.nick} keluar`, 'offline');
+            if (data.nick && data.nick !== nick) {
+              showPopup(`@${data.nick} keluar`, 'offline');
+            }
             break;
           case 'history':
-            setMessages((data.messages || []).slice(-MAX_RENDERED));
+            if (Array.isArray(data.messages)) {
+              setMessages(data.messages.slice(-MAX_RENDERED));
+            }
             break;
           case 'message': {
-            setMessages((prev) => [...prev, data.message].slice(-MAX_RENDERED));
-            const sender = data.message.clientId;
-            const pending = timers.get(sender);
-            if (pending) {
-              clearTimeout(pending);
-              timers.delete(sender);
+            if (data.message) {
+              setMessages((prev) => [...(prev || []), data.message].slice(-MAX_RENDERED));
+              const sender = data.message.clientId;
+              const pending = timers.get(sender);
+              if (pending) {
+                clearTimeout(pending);
+                timers.delete(sender);
+              }
+              setTyping((prev) => {
+                if (!prev || !(sender in prev)) return prev;
+                const next = { ...prev };
+                delete next[sender];
+                return next;
+              });
             }
-            setTyping((prev) => {
-              if (!(sender in prev)) return prev;
-              const next = { ...prev };
-              delete next[sender];
-              return next;
-            });
             break;
           }
           case 'presence':
-            setCount(data.count);
-            setUsers(data.users || []); // Pelindung array
+            setCount(data.count || 0);
+            setUsers(Array.isArray(data.users) ? data.users : []);
             break;
           case 'typing': {
             if (data.clientId === clientId) break;
             const { clientId: who, name: whoName } = data;
-            setTyping((prev) => ({ ...prev, [who]: whoName }));
+            setTyping((prev) => ({ ...prev, [who]: whoName || 'anon' }));
             const existing = timers.get(who);
             if (existing) clearTimeout(existing);
             timers.set(
@@ -188,6 +193,7 @@ export default function Chat({
               setTimeout(() => {
                 timers.delete(who);
                 setTyping((prev) => {
+                  if (!prev) return prev;
                   const next = { ...prev };
                   delete next[who];
                   return next;
@@ -197,35 +203,46 @@ export default function Chat({
             break;
           }
           case 'nick_ok':
-            setContacts(data.contacts || []);
+            setContacts(Array.isArray(data.contacts) ? data.contacts : []);
             break;
           case 'nick_error':
             onNickErrorRef.current?.(data.reason);
             break;
           case 'contacts':
-            setContacts(data.contacts || []);
+            setContacts(Array.isArray(data.contacts) ? data.contacts : []);
             setContactError('');
             break;
           case 'contact_error':
-            setContactError(
-              data.reason === 'self' ? 'Itu nick kamu sendiri.' : 'Nick tidak ditemukan.',
-            );
+            setContactError(data.reason === 'self' ? 'Itu nick kamu sendiri.' : 'Nick tidak ditemukan.');
             break;
           case 'dm': {
-            const m = data.message;
-            const other = m.from === nick ? m.to : m.from;
-            setDms((prev) => ({
-              ...prev,
-              [other]: [...(prev[other] ?? []), m].slice(-MAX_RENDERED),
-            }));
-            setContacts((prev) => (prev.includes(other) ? prev : [...prev, other].sort()));
-            if (m.from !== nick && activeRef.current !== other) {
-              setUnread((prev) => ({ ...prev, [other]: (prev[other] ?? 0) + 1 }));
+            if (data.message) {
+              const m = data.message;
+              const other = m.from === nick ? m.to : m.from;
+              setDms((prev) => {
+                const safePrev = prev || {};
+                return {
+                  ...safePrev,
+                  [other]: [...(safePrev[other] ?? []), m].slice(-MAX_RENDERED),
+                };
+              });
+              setContacts((prev) => {
+                const safePrev = prev || [];
+                return safePrev.includes(other) ? safePrev : [...safePrev, other].sort();
+              });
+              if (m.from !== nick && activeRef.current !== other) {
+                setUnread((prev) => {
+                  const safePrev = prev || {};
+                  return { ...safePrev, [other]: (safePrev[other] ?? 0) + 1 };
+                });
+              }
             }
             break;
           }
           case 'dm_history':
-            setDms((prev) => ({ ...prev, [data.with]: data.messages || [] }));
+            if (data.with && Array.isArray(data.messages)) {
+              setDms((prev) => ({ ...(prev || {}), [data.with]: data.messages }));
+            }
             break;
         }
       });
@@ -273,9 +290,10 @@ export default function Chat({
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     const newStatus = fd.get('status') as string;
-    setMyStatus(newStatus || 'sedang online');
+    const cleanStatus = newStatus || 'sedang online';
+    setMyStatus(cleanStatus);
     setShowProfile(false); 
-    sendJson({ type: 'setStatus', status: newStatus || 'sedang online' }); 
+    sendJson({ type: 'setStatus', status: cleanStatus }); 
   };
 
   const sendJson = (payload: object): boolean => {
@@ -290,10 +308,9 @@ export default function Chat({
     setActive(who);
     if (who) {
       setUnread((prev) => {
-        if (!prev[who]) return prev;
-        const next = { ...prev };
-        delete next[who];
-        return next;
+        const safePrev = { ...(prev || {}) };
+        delete safePrev[who];
+        return safePrev;
       });
       sendJson({ type: 'dmHistory', with: who });
     }
@@ -335,9 +352,7 @@ export default function Chat({
     lastTypingSent.current = 0;
   };
 
-  const onlineCount = status === 'online' ? Math.max(count, 1) : count;
-
-  const typingNames = active ? [] : Object.values(typing);
+  const typingNames = active ? [] : Object.values(typing || {});
   const typingLabel =
     typingNames.length === 0
       ? ''
@@ -347,31 +362,36 @@ export default function Chat({
           ? `${typingNames[0]} and ${typingNames[1]} are typing…`
           : 'Several people are typing…';
 
+  // Fallback Aman untuk mapping
+  const safeDms = Array.isArray(dms[active || '']) ? dms[active || ''] : [];
+  const safeMessages = Array.isArray(messages) ? messages : [];
+
   const rows: Row[] = active
-    ? (dms[active] ?? []).map((m) => ({
-        id: m.id,
+    ? safeDms.filter(Boolean).map((m) => ({
+        id: m.id || Math.random().toString(),
         kind: 'chat' as const,
-        seed: m.from,
-        name: m.from,
-        text: m.text,
+        seed: m.from || 'anon',
+        name: m.from || 'anon',
+        text: m.text || '',
         mine: m.from === nick,
       }))
-    : (messages || []).map((m) => ({
-        id: m.id,
-        kind: m.kind,
-        seed: m.clientId,
-        name: m.name,
-        text: m.text,
+    : safeMessages.filter(Boolean).map((m) => ({
+        id: m.id || Math.random().toString(),
+        kind: m.kind || 'chat',
+        seed: m.clientId || 'anon',
+        name: m.name || m.clientId || 'anon',
+        text: m.text || '',
         mine: m.clientId === clientId,
       }));
 
   return (
-    <div className="flex flex-1 w-full max-w-2xl flex-col">
+    <div className="flex flex-1 w-full max-w-2xl flex-col relative">
+      {/* Container Popup */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none">
-        {popups.map((popup) => (
+        {(popups || []).filter(Boolean).map((popup) => (
           <div
             key={popup.id}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded-full shadow-md text-[11px] font-medium transition-all duration-300 transform scale-100 opacity-100 ${
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full shadow-md text-[11px] font-medium transition-all duration-300 ${
               popup.status === 'online' ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-zinc-100 text-zinc-600 border border-zinc-200'
             }`}
           >
@@ -381,11 +401,12 @@ export default function Chat({
         ))}
       </div>
 
+      {/* Profil Modal */}
       {showProfile && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-zinc-900 rounded-2xl w-full max-w-xs p-6 flex flex-col items-center shadow-xl">
-            <Avatar size={72} name={clientId} variant="beam" />
-            <h2 className="mt-4 text-lg font-bold">@{nick}</h2>
+            <Avatar size={72} name={clientId || 'anon'} variant="beam" />
+            <h2 className="mt-4 text-lg font-bold">@{nick || 'anon'}</h2>
             <form onSubmit={updateStatus} className="w-full mt-4 flex flex-col gap-3">
               <div>
                 <label className="text-xs text-zinc-500 mb-1 block">Status Profil</label>
@@ -405,27 +426,28 @@ export default function Chat({
         </div>
       )}
 
+      {/* Header */}
       <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-black/10 bg-white px-4 py-3 dark:border-white/15 dark:bg-zinc-950">
         <div className="flex items-center gap-3">
           <button onClick={() => setShowProfile(true)} className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left">
-            <Avatar size={32} name={clientId} variant="beam" />
+            <Avatar size={32} name={clientId || 'anon'} variant="beam" />
             <div className="flex flex-col">
-              <span className="text-sm font-bold leading-none">@{nick}</span>
+              <span className="text-sm font-bold leading-none">@{nick || 'anon'}</span>
               <span className="text-[10px] text-zinc-500 mt-1 truncate max-w-[100px]">{myStatus}</span>
             </div>
           </button>
         </div>
         
         <div className="flex items-center gap-3">
-          {/* DIKEMBALIKAN: Daftar Avatar User Online */}
           <div className="flex -space-x-2">
-            {(users || []).slice(0, 5).map((user) => (
+            {(users || []).filter(Boolean).slice(0, 5).map((user) => (
               <span
-                key={user.clientId}
-                title={`@${user.nick || user.name} - ${user.customStatus || 'sedang online'}`}
+                key={user.clientId || Math.random().toString()}
+                title={`@${user.nick || user.name || 'anon'} - ${user.customStatus || 'sedang online'}`}
                 className="inline-flex rounded-full ring-2 ring-white dark:ring-zinc-950"
               >
-                <Avatar size={24} name={user.clientId} variant="beam" />
+                {/* Fallback di Avatar sangat penting agar tidak crash */}
+                <Avatar size={24} name={user.clientId || 'anon'} variant="beam" />
               </span>
             ))}
           </div>
@@ -438,14 +460,12 @@ export default function Chat({
         </div>
       </header>
 
-      <nav
-        className="flex items-center gap-2 overflow-x-auto border-b border-black/10 px-4 py-2 dark:border-white/15"
-        aria-label="Chats"
-      >
+      {/* Nav Tab */}
+      <nav className="flex items-center gap-2 overflow-x-auto border-b border-black/10 px-4 py-2 dark:border-white/15">
         <button type="button" onClick={() => selectChat(null)} className={chip(active === null)}>
           Global
         </button>
-        {(contacts || []).map((contact) => (
+        {(contacts || []).filter(Boolean).map((contact) => (
           <button
             key={contact}
             type="button"
@@ -462,10 +482,8 @@ export default function Chat({
         ))}
       </nav>
 
-      <form
-        onSubmit={addContact}
-        className="flex items-center gap-2 border-b border-black/10 px-4 py-2 dark:border-white/15"
-      >
+      {/* Form Tambah Kontak */}
+      <form onSubmit={addContact} className="flex items-center gap-2 border-b border-black/10 px-4 py-2 dark:border-white/15">
         <input
           value={contactInput}
           onChange={(event) => setContactInput(event.target.value)}
@@ -473,25 +491,17 @@ export default function Chat({
           autoCapitalize="none"
           autoCorrect="off"
           className="min-w-0 flex-1 rounded-full border border-black/10 bg-transparent px-3 py-1.5 text-xs outline-none focus:border-blue-500 dark:border-white/15"
-          aria-label="Tambah kontak"
         />
-        <button
-          type="submit"
-          disabled={status !== 'online' || !contactInput.trim()}
-          className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
-        >
+        <button type="submit" disabled={!contactInput.trim()} className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900">
           Tambah
         </button>
         <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
-          Nick kamu: @{nick}
+          Nick kamu: @{nick || 'anon'}
         </span>
       </form>
-      {contactError && (
-        <p className="px-4 pt-1 text-xs text-red-500" role="alert">
-          {contactError}
-        </p>
-      )}
+      {contactError && <p className="px-4 pt-1 text-xs text-red-500">{contactError}</p>}
 
+      {/* List Chat */}
       <ol className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-4">
         {active && rows.length === 0 && (
           <li className="self-center text-xs text-zinc-400 dark:text-zinc-500">
@@ -501,44 +511,28 @@ export default function Chat({
         {rows.map((row) => {
           if (row.kind === 'system') {
             return (
-              <li
-                key={row.id}
-                className="self-center px-3 py-0.5 text-xs text-zinc-400 dark:text-zinc-500"
-              >
+              <li key={row.id} className="self-center px-3 py-0.5 text-xs text-zinc-400 dark:text-zinc-500">
                 {row.text}
               </li>
             );
           }
           return (
-            <li
-              key={row.id}
-              className={`flex items-end gap-2 ${row.mine ? 'flex-row-reverse' : 'flex-row'}`}
-            >
+            <li key={row.id} className={`flex items-end gap-2 ${row.mine ? 'flex-row-reverse' : 'flex-row'}`}>
               <span className="shrink-0">
-                <Avatar size={28} name={row.seed} variant="beam" />
+                {/* Fallback di Avatar sangat penting agar tidak crash */}
+                <Avatar size={28} name={row.seed || 'anon'} variant="beam" />
               </span>
-              <div
-                className={`flex min-w-0 max-w-[75%] flex-col ${
-                  row.mine ? 'items-end' : 'items-start'
-                }`}
-              >
+              <div className={`flex min-w-0 max-w-[75%] flex-col ${row.mine ? 'items-end' : 'items-start'}`}>
                 <span className="px-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-                  {row.mine ? 'You' : `@${row.name}`}
+                  {row.mine ? 'You' : `@${row.name || 'anon'}`}
                 </span>
-                <span
-                  className={`w-fit max-w-full whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                    row.mine
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100'
-                  }`}
-                >
+                <span className={`w-fit max-w-full whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${row.mine ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100'}`}>
                   {row.text}
                 </span>
               </div>
             </li>
           );
         })}
-        {/* DIPERBAIKI: Menggunakan <li /> alih-alih <div /> agar tidak menyalahi <ol /> */}
         <li ref={bottomRef} className="h-0 w-0 p-0 m-0" aria-hidden="true" />
       </ol>
 
@@ -546,22 +540,14 @@ export default function Chat({
         {typingLabel}
       </div>
 
-      <form
-        onSubmit={send}
-        className="flex gap-2 border-t border-black/10 p-3 dark:border-white/15"
-      >
+      <form onSubmit={send} className="flex gap-2 border-t border-black/10 p-3 dark:border-white/15">
         <input
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           placeholder={active ? `Pesan ke @${active}` : 'Message'}
           className="flex-1 rounded-full border border-black/10 bg-transparent px-4 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/15"
-          aria-label="Message"
         />
-        <button
-          type="submit"
-          disabled={status !== 'online' || !draft.trim()}
-          className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white disabled:opacity-40"
-        >
+        <button type="submit" disabled={status !== 'online' || !draft.trim()} className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white disabled:opacity-40">
           Send
         </button>
       </form>
