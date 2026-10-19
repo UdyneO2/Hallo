@@ -65,8 +65,8 @@ const TYPING_MAXLEN = 50;
 const NOTIF_MAXLEN = 50; // cap the typing stream
 const HISTORY = 50; // messages replayed to a newly-joined client
 
-type ConnMeta = { clientId: string; name: string; customStatus?: string };
-type Conn = { connectionId: string; clientId: string; name: string; nick: string; customStatus?: string };
+type ConnMeta = { clientId: string; name: string; avatarUrl?: string; customStatus?: string };
+type Conn = { connectionId: string; clientId: string; name: string; nick: string; avatarUrl?: string; customStatus?: string };
 type StreamFields = { d: string; o: string };
 
 type Hub = {
