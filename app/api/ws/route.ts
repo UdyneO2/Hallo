@@ -1,18 +1,6 @@
 import { experimental_upgradeWebSocket, type WebSocketData } from '@vercel/functions';
-import {
-  addContact,
-  join,
-  loadDmHistory,
-  postDm,
-  postMessage,
-  postTyping,
-  register,
-  setNick,
-  setStatus,
-  unregister,
-} from '@/lib/chat';
+import { addContact, join, loadDmHistory, postDm, postMessage, postTyping, register, setNick, setStatus, unregister } from '@/lib/chat';
 
-// Wire-format the client sends over the socket.
 type ClientEvent =
   | { type: 'join'; clientId: string; name: string }
   | { type: 'message'; text: string }
@@ -21,7 +9,7 @@ type ClientEvent =
   | { type: 'addContact'; nick: string }
   | { type: 'dm'; to: string; text: string }
   | { type: 'dmHistory'; with: string }
-  | { type: 'setStatus'; status: string };
+  | { type: 'setStatus'; status: string; avatarUrl?: string }; // [BARU] Tambah avatarUrl
 
 export function GET() {
   return experimental_upgradeWebSocket((ws) => {
@@ -31,35 +19,17 @@ export function GET() {
       let event: ClientEvent;
       try {
         event = JSON.parse(data.toString());
-      } catch {
-        return; 
-      }
+      } catch { return; }
 
       switch (event.type) {
-        case 'join':
-          void join(ws, event.clientId, event.name);
-          break;
-        case 'message':
-          void postMessage(ws, event.text);
-          break;
-        case 'typing':
-          void postTyping(ws);
-          break;
-        case 'setNick':
-          void setNick(ws, event.nick, event.secret);
-          break;
-        case 'addContact':
-          void addContact(ws, event.nick);
-          break;
-        case 'dm':
-          void postDm(ws, event.to, event.text);
-          break;
-        case 'dmHistory':
-          void loadDmHistory(ws, event.with);
-          break;
-        case 'setStatus': // [BARU] Handler untuk menangani update status profil
-          void setStatus(ws, event.status);
-          break;
+        case 'join': void join(ws, event.clientId, event.name); break;
+        case 'message': void postMessage(ws, event.text); break;
+        case 'typing': void postTyping(ws); break;
+        case 'setNick': void setNick(ws, event.nick, event.secret); break;
+        case 'addContact': void addContact(ws, event.nick); break;
+        case 'dm': void postDm(ws, event.to, event.text); break;
+        case 'dmHistory': void loadDmHistory(ws, event.with); break;
+        case 'setStatus': void setStatus(ws, event.status, event.avatarUrl); break; // [BARU]
       }
     });
 
