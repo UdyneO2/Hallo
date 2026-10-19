@@ -1,11 +1,25 @@
 import { experimental_upgradeWebSocket, type WebSocketData } from '@vercel/functions';
-import { join, postMessage, postTyping, register, unregister } from '@/lib/chat';
+import {
+  addContact,
+  join,
+  loadDmHistory,
+  postDm,
+  postMessage,
+  postTyping,
+  register,
+  setNick,
+  unregister,
+} from '@/lib/chat';
 
 // Wire-format the client sends over the socket.
 type ClientEvent =
   | { type: 'join'; clientId: string; name: string }
   | { type: 'message'; text: string }
-  | { type: 'typing' };
+  | { type: 'typing' }
+  | { type: 'setNick'; nick: string; secret: string }
+  | { type: 'addContact'; nick: string }
+  | { type: 'dm'; to: string; text: string }
+  | { type: 'dmHistory'; with: string };
 
 // A WebSocket connection starts as a GET request with an `Upgrade` header.
 // `experimental_upgradeWebSocket` performs the upgrade and hands us the socket.
@@ -33,6 +47,18 @@ export function GET() {
           break;
         case 'typing':
           void postTyping(ws);
+          break;
+        case 'setNick':
+          void setNick(ws, event.nick, event.secret);
+          break;
+        case 'addContact':
+          void addContact(ws, event.nick);
+          break;
+        case 'dm':
+          void postDm(ws, event.to, event.text);
+          break;
+        case 'dmHistory':
+          void loadDmHistory(ws, event.with);
           break;
       }
     });
