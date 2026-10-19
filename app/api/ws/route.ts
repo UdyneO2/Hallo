@@ -1,40 +1,76 @@
-import { experimental_upgradeWebSocket, type WebSocketData } from '@vercel/functions';
-import { addContact, join, loadDmHistory, postDm, postMessage, postTyping, register, setNick, setStatus, unregister } from '@/lib/chat';
+import {
+  addContact,
+  join,
+  loadDmHistory,
+  postDm,
+  postMessage,
+  postTyping,
+  register,
+  setNick,
+  setStatus,
+  unregister,
+} from '@/lib/chat';
 
-type ClientEvent =
-  | { type: 'join'; clientId: string; name: string }
-  | { type: 'message'; text: string }
-  | { type: 'typing' }
-  | { type: 'setNick'; nick: string; secret: string }
-  | { type: 'addContact'; nick: string }
-  | { type: 'dm'; to: string; text: string }
-  | { type: 'dmHistory'; with: string }
-  | { type: 'setStatus'; status: string; avatarUrl?: string }; // [BARU] Tambah avatarUrl
+export const runtime = 'edge';
 
-export function GET() {
-  return experimental_upgradeWebSocket((ws) => {
-    register(ws);
+export async function GET(request: Request) {
+  const upgradeHeader = request.headers.get('upgrade');
+  if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
+    return new Response('Expected WebSocket upgrade', { status: 426 });
+  }
 
-    ws.on('message', (data: WebSocketData) => {
-      let event: ClientEvent;
-      try {
-        event = JSON.parse(data.toString());
-      } catch { return; }
+  // Cloudflare WebSocket Pair
+  const pair = new WebSocketPair();
+  const [clientSocket, serverSocket] = Object.values(pair);
 
-      switch (event.type) {
-        case 'join': void join(ws, event.clientId, event.name); break;
-        case 'message': void postMessage(ws, event.text); break;
-        case 'typing': void postTyping(ws); break;
-        case 'setNick': void setNick(ws, event.nick, event.secret); break;
-        case 'addContact': void addContact(ws, event.nick); break;
-        case 'dm': void postDm(ws, event.to, event.text); break;
-        case 'dmHistory': void loadDmHistory(ws, event.with); break;
-        case 'setStatus': void setStatus(ws, event.status, event.avatarUrl); break; // [BARU]
-      }
-    });
+  // Accept koneksi WebSocket di sisi server
+  serverSocket.accept();
 
-    const close = () => void unregister(ws);
-    ws.on('close', close);
-    ws.on('error', close);
+  // Register socket ke chat hub
+  register(serverSocket);
+
+  serverSocket.addEventListener('message', (event) => {
+    let data: any;
+    try {
+      data = JSON.parse(event.data.toString());
+    } catch {
+      return;
+    }
+
+    switch (data.type) {
+      case 'join':
+        void join(serverSocket, data.clientId, data.name);
+        break;
+      case 'message':
+        void postMessage(serverSocket, data.text);
+        break;
+      case 'typing':
+        void postTyping(serverSocket);
+        break;
+      case 'setNick':
+        void setNick(serverSocket, data.nick, data.secret);
+        break;
+      case 'addContact':
+        void addContact(serverSocket, data.nick);
+        break;
+      case 'dm':
+        void postDm(serverSocket, data.to, data.text);
+        break;
+      case 'dmHistory':
+        void loadDmHistory(serverSocket, data.with);
+        break;
+      case 'setStatus':
+        void setStatus(serverSocket, data.status, data.avatarUrl);
+        break;
+    }
+  });
+
+  const closeHandler = () => void unregister(serverSocket);
+  serverSocket.addEventListener('close', closeHandler);
+  serverSocket.addEventListener('error', closeHandler);
+
+  return new Response(null, {
+    status: 101,
+    webSocket: clientSocket,
   });
 }
