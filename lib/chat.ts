@@ -598,7 +598,6 @@ export async function setNick(ws: WebSocket, rawNick: string, rawSecret: string)
   }
   conn.nick = nick;
   send(ws, { type: "nick_ok", nick, contacts: await listContacts(nick) });
-}
 await publishNotif("user_joined", nick);
 }
 
