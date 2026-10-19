@@ -36,7 +36,6 @@ type ServerEvent =
   | { type: 'user_joined'; nick: string }
   | { type: 'user_left'; nick: string };
 
-// Satu baris di daftar pesan (global atau DM), sudah dinormalisasi.
 type Row = {
   id: string;
   kind: 'chat' | 'system';
@@ -49,10 +48,12 @@ type Row = {
 type Status = 'connecting' | 'online' | 'offline';
 
 const MAX_RENDERED = 200;
-const TYPING_THROTTLE_MS = 2000; // how often we tell the server we're typing
-const TYPING_CLEAR_MS = 3000; // how long a "typing" badge lingers without a refresh
+const TYPING_THROTTLE_MS = 2000; 
+const TYPING_CLEAR_MS = 3000; 
 
 function wsUrl(): string {
+  // Tambahan pelindung agar aman saat SSR Next.js
+  if (typeof window === 'undefined') return '';
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${protocol}://${window.location.host}/api/ws`;
 }
@@ -80,7 +81,7 @@ export default function Chat({
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [count, setCount] = useState(0);
-  const [status, setStatus] = useState<'connecting' | 'online' | 'offline'>('connecting');
+  const [status, setStatus] = useState<Status>('connecting');
   const [draft, setDraft] = useState('');
   const [showProfile, setShowProfile] = useState(false);
   const [myStatus, setMyStatus] = useState('sedang online');
@@ -94,10 +95,8 @@ export default function Chat({
     }, 3000);
   };
 
-  // Map of other people currently typing: clientId -> display name.
   const [typing, setTyping] = useState<Record<string, string>>({});
 
-  // Private chat: kontak (nick), chat aktif (null = global), pesan per lawan bicara.
   const [contacts, setContacts] = useState<string[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [dms, setDms] = useState<Record<string, DM[]>>({});
@@ -106,11 +105,10 @@ export default function Chat({
   const [contactError, setContactError] = useState('');
 
   const socketRef = useRef<WebSocket | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLLIElement | null>(null); // Ubah ke HTMLLIElement agar valid di ol
   const lastTypingSent = useRef(0);
   const activeRef = useRef<string | null>(null);
   const onNickErrorRef = useRef(onNickError);
-  // Per-sender timers that clear a "typing" badge if no refresh arrives.
   const typingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
@@ -134,7 +132,6 @@ export default function Chat({
         setStatus('online');
         socket.send(JSON.stringify({ type: 'join', clientId, name: nick })); 
         socket.send(JSON.stringify({ type: 'setNick', nick, secret }));
-        // Setelah reconnect, muat ulang riwayat DM yang sedang dibuka.
         if (activeRef.current) {
           socket.send(JSON.stringify({ type: 'dmHistory', with: activeRef.current }));
         }
@@ -158,12 +155,10 @@ export default function Chat({
             showPopup(`@${data.nick} keluar`, 'offline');
             break;
           case 'history':
-            setMessages(data.messages.slice(-MAX_RENDERED));
+            setMessages((data.messages || []).slice(-MAX_RENDERED));
             break;
           case 'message': {
             setMessages((prev) => [...prev, data.message].slice(-MAX_RENDERED));
-            // A message from someone means they've stopped typing — clear their
-            // badge now instead of waiting for the lingering TYPING_CLEAR_MS timer.
             const sender = data.message.clientId;
             const pending = timers.get(sender);
             if (pending) {
@@ -180,10 +175,10 @@ export default function Chat({
           }
           case 'presence':
             setCount(data.count);
-            setUsers(data.users);
+            setUsers(data.users || []); // Pelindung array
             break;
           case 'typing': {
-            if (data.clientId === clientId) break; // ignore our own typing
+            if (data.clientId === clientId) break;
             const { clientId: who, name: whoName } = data;
             setTyping((prev) => ({ ...prev, [who]: whoName }));
             const existing = timers.get(who);
@@ -202,13 +197,13 @@ export default function Chat({
             break;
           }
           case 'nick_ok':
-            setContacts(data.contacts);
+            setContacts(data.contacts || []);
             break;
           case 'nick_error':
             onNickErrorRef.current?.(data.reason);
             break;
           case 'contacts':
-            setContacts(data.contacts);
+            setContacts(data.contacts || []);
             setContactError('');
             break;
           case 'contact_error':
@@ -223,7 +218,6 @@ export default function Chat({
               ...prev,
               [other]: [...(prev[other] ?? []), m].slice(-MAX_RENDERED),
             }));
-            // Pengirim baru otomatis muncul di daftar kontak (lokal).
             setContacts((prev) => (prev.includes(other) ? prev : [...prev, other].sort()));
             if (m.from !== nick && activeRef.current !== other) {
               setUnread((prev) => ({ ...prev, [other]: (prev[other] ?? 0) + 1 }));
@@ -231,13 +225,11 @@ export default function Chat({
             break;
           }
           case 'dm_history':
-            setDms((prev) => ({ ...prev, [data.with]: data.messages }));
+            setDms((prev) => ({ ...prev, [data.with]: data.messages || [] }));
             break;
         }
       });
 
-      // Connections close when the Function reaches its max duration, so
-      // reconnect with exponential backoff and re-send our join on open.
       socket.addEventListener('close', () => {
         if (cancelled) return;
         setStatus('offline');
@@ -245,7 +237,6 @@ export default function Chat({
         reconnectDelay = Math.min(reconnectDelay * 2, 30000);
       });
 
-      // An error is always followed by a close, where we handle reconnect.
       socket.addEventListener('error', () => socket.close());
     }
 
@@ -263,28 +254,17 @@ export default function Chat({
   if (status === 'connecting') {
     return (
       <div className="flex flex-1 w-full flex-col items-center justify-center bg-white dark:bg-zinc-950">
-        <style>{`
-          @keyframes loadingBar {
-            0% { transform: translateX(-100%); }
-            100% { transform: translateX(100%); }
-          }
-        `}</style>
         <h2 className="text-2xl font-bold mb-6 text-zinc-800 dark:text-zinc-100 animate-pulse">
           Hallo?
         </h2>
-        {/* Animated Progress Bar */}
         <div className="w-48 h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden relative">
-          <div 
-            className="absolute top-0 bottom-0 left-0 w-1/2 bg-blue-600 rounded-full"
-            style={{ animation: 'loadingBar 1.2s infinite ease-in-out' }}
-          />
+          <div className="absolute top-0 bottom-0 left-0 w-1/3 bg-blue-600 rounded-full animate-bounce" />
         </div>
         <p className="mt-4 text-xs text-zinc-400">Menghubungkan ke server...</p>
       </div>
     );
   }
 
-  // Auto-scroll to the newest message.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typing, dms, active]);
@@ -294,8 +274,8 @@ export default function Chat({
     const fd = new FormData(e.currentTarget);
     const newStatus = fd.get('status') as string;
     setMyStatus(newStatus || 'sedang online');
-    setShowProfile(false); // Tutup profil
-    sendJson({ type: 'setStatus', status: newStatus || 'sedang online' }); // Aktifkan jika server sudah siap
+    setShowProfile(false); 
+    sendJson({ type: 'setStatus', status: newStatus || 'sedang online' }); 
   };
 
   const sendJson = (payload: object): boolean => {
@@ -333,7 +313,7 @@ export default function Chat({
     const socket = socketRef.current;
     const now = Date.now();
     if (
-      !active && // sinyal "typing" hanya untuk chat global
+      !active && 
       value &&
       socket?.readyState === WebSocket.OPEN &&
       now - lastTypingSent.current > TYPING_THROTTLE_MS
@@ -355,7 +335,6 @@ export default function Chat({
     lastTypingSent.current = 0;
   };
 
-  // While we're connected there's always at least us, so never show 0.
   const onlineCount = status === 'online' ? Math.max(count, 1) : count;
 
   const typingNames = active ? [] : Object.values(typing);
@@ -377,7 +356,7 @@ export default function Chat({
         text: m.text,
         mine: m.from === nick,
       }))
-    : messages.map((m) => ({
+    : (messages || []).map((m) => ({
         id: m.id,
         kind: m.kind,
         seed: m.clientId,
@@ -401,6 +380,7 @@ export default function Chat({
           </div>
         ))}
       </div>
+
       {showProfile && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-zinc-900 rounded-2xl w-full max-w-xs p-6 flex flex-col items-center shadow-xl">
@@ -424,6 +404,7 @@ export default function Chat({
           </div>
         </div>
       )}
+
       <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-black/10 bg-white px-4 py-3 dark:border-white/15 dark:bg-zinc-950">
         <div className="flex items-center gap-3">
           <button onClick={() => setShowProfile(true)} className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left">
@@ -436,7 +417,19 @@ export default function Chat({
         </div>
         
         <div className="flex items-center gap-3">
-          {/* Sisa UI (Indicator Online, Leave Button) */}
+          {/* DIKEMBALIKAN: Daftar Avatar User Online */}
+          <div className="flex -space-x-2">
+            {(users || []).slice(0, 5).map((user) => (
+              <span
+                key={user.clientId}
+                title={`@${user.nick || user.name} - ${user.customStatus || 'sedang online'}`}
+                className="inline-flex rounded-full ring-2 ring-white dark:ring-zinc-950"
+              >
+                <Avatar size={24} name={user.clientId} variant="beam" />
+              </span>
+            ))}
+          </div>
+
           {onLeave && (
             <button onClick={onLeave} className="text-xs text-red-500 hover:underline">
               Keluar
@@ -444,7 +437,7 @@ export default function Chat({
           )}
         </div>
       </header>
-      {/* Tab chat: Global + kontak (scroll horizontal di HP). */}
+
       <nav
         className="flex items-center gap-2 overflow-x-auto border-b border-black/10 px-4 py-2 dark:border-white/15"
         aria-label="Chats"
@@ -452,7 +445,7 @@ export default function Chat({
         <button type="button" onClick={() => selectChat(null)} className={chip(active === null)}>
           Global
         </button>
-        {contacts.map((contact) => (
+        {(contacts || []).map((contact) => (
           <button
             key={contact}
             type="button"
@@ -530,7 +523,7 @@ export default function Chat({
                 }`}
               >
                 <span className="px-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-                  {row.mine ? 'You' : row.name}
+                  {row.mine ? 'You' : `@${row.name}`}
                 </span>
                 <span
                   className={`w-fit max-w-full whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
@@ -545,7 +538,8 @@ export default function Chat({
             </li>
           );
         })}
-        <div ref={bottomRef} />
+        {/* DIPERBAIKI: Menggunakan <li /> alih-alih <div /> agar tidak menyalahi <ol /> */}
+        <li ref={bottomRef} className="h-0 w-0 p-0 m-0" aria-hidden="true" />
       </ol>
 
       <div className="h-5 px-4 text-xs text-zinc-400 dark:text-zinc-500" aria-live="polite">
