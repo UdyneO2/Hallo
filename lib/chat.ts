@@ -496,12 +496,13 @@ export async function unregister(ws: WebSocket): Promise<void> {
     }
   }
   await broadcastPresence(true);
-  if (conn.nick) {
+  if (conn?.clientId && !(await isOnline(conn.clientId))) {
+    if (conn.nick) {
       await publishNotif("user_left", conn.nick);
     }
+  }
   if (hub.conns.size === 0) stopStream();
 }
-
 /** Load the most recent messages in chronological order for a new client. */
 export async function loadHistory(): Promise<Message[]> {
   if (!redis) return [];
