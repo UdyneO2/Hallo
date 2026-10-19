@@ -1,7 +1,20 @@
-import type { WebSocket } from "ws";
-import type Redis from "ioredis";
-import { createHash } from "node:crypto";
-import { fieldsToObject, redis } from "./redis";
+import { Redis } from "@upstash/redis"; // Menggantikan ioredis[span_13](start_span)[span_13](end_span)
+
+// Menggantikan node:crypto createHash("sha256")[span_14](start_span)[span_14](end_span)
+async function hashSecret(s: string): Promise<string> {
+  const msgUint8 = new TextEncoder().encode(s);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Inisialisasi Upstash Redis REST Client
+export const redis = (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
+  ? new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    })
+  : null;
 
 /**
  * Chat hub — coordinates one global room across Vercel Function instances.
