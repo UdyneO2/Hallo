@@ -13,15 +13,8 @@ type Message = {
 };
 
 type DM = { id: string; from: string; to: string; text: string; ts: number };
-
-// Tipe User DIPERBAIKI: Mengakomodasi format 'name' dan 'nick'
 type User = { clientId: string; name: string; nick?: string; customStatus?: string };
-
-type PopupEvent = {
-  id: string;
-  message: string;
-  status: 'online' | 'offline';
-};
+type PopupEvent = { id: string; message: string; status: 'online' | 'offline' };
 
 type ServerEvent =
   | { type: 'history'; messages: Message[] }
@@ -87,6 +80,9 @@ export default function Chat({
   const [myStatus, setMyStatus] = useState('sedang online');
   const [popups, setPopups] = useState<PopupEvent[]>([]);
   
+  // ERROR HANDLING STATE
+  const [sysError, setSysError] = useState<string | null>(null);
+
   const showPopup = (message: string, userStatus: 'online' | 'offline') => {
     const id = Math.random().toString(36).substring(2, 9);
     setPopups((prev) => [...(prev || []), { id, message, status: userStatus }]);
@@ -123,127 +119,138 @@ export default function Chat({
     function connect() {
       if (cancelled) return;
       setStatus('connecting');
+      setSysError(null); // Reset error saat mencoba connect ulang
+      
       const socket = new WebSocket(wsUrl());
       socketRef.current = socket;
 
       socket.addEventListener('open', () => {
         reconnectDelay = 1000;
         setStatus('online');
-        socket.send(JSON.stringify({ type: 'join', clientId, name: nick })); 
-        socket.send(JSON.stringify({ type: 'setNick', nick, secret }));
-        if (activeRef.current) {
-          socket.send(JSON.stringify({ type: 'dmHistory', with: activeRef.current }));
+        try {
+          socket.send(JSON.stringify({ type: 'join', clientId, name: nick })); 
+          socket.send(JSON.stringify({ type: 'setNick', nick, secret }));
+          if (activeRef.current) {
+            socket.send(JSON.stringify({ type: 'dmHistory', with: activeRef.current }));
+          }
+        } catch (err) {
+          console.error("Error sending join payload:", err);
+          setSysError("Gagal mengirim data login ke server.");
         }
       });
 
       socket.addEventListener('message', (event) => {
-        let data: ServerEvent;
         try {
-          data = JSON.parse(event.data);
-        } catch {
-          return;
-        }
+          // Tangkap error jika server mengirim data yang cacat/bukan JSON
+          let data: ServerEvent;
+          try {
+            data = JSON.parse(event.data);
+          } catch {
+            return; // Abaikan pesan non-JSON
+          }
 
-        switch (data.type) {
-          case 'user_joined':
-            if (data.nick && data.nick !== nick) {
-              showPopup(`@${data.nick} bergabung`, 'online');
-            }
-            break;
-          case 'user_left':
-            if (data.nick && data.nick !== nick) {
-              showPopup(`@${data.nick} keluar`, 'offline');
-            }
-            break;
-          case 'history':
-            if (Array.isArray(data.messages)) {
-              setMessages(data.messages.slice(-MAX_RENDERED));
-            }
-            break;
-          case 'message': {
-            if (data.message) {
-              setMessages((prev) => [...(prev || []), data.message].slice(-MAX_RENDERED));
-              const sender = data.message.clientId;
-              const pending = timers.get(sender);
-              if (pending) {
-                clearTimeout(pending);
-                timers.delete(sender);
+          switch (data.type) {
+            case 'user_joined':
+              if (data.nick && data.nick !== nick) showPopup(`@${data.nick} bergabung`, 'online');
+              break;
+            case 'user_left':
+              if (data.nick && data.nick !== nick) showPopup(`@${data.nick} keluar`, 'offline');
+              break;
+            case 'history':
+              if (Array.isArray(data.messages)) {
+                setMessages(data.messages.slice(-MAX_RENDERED));
               }
-              setTyping((prev) => {
-                if (!prev || !(sender in prev)) return prev;
-                const next = { ...prev };
-                delete next[sender];
-                return next;
-              });
+              break;
+            case 'message': {
+              if (data.message && data.message.id) {
+                setMessages((prev) => [...(prev || []), data.message].slice(-MAX_RENDERED));
+                const sender = data.message.clientId;
+                if (sender) {
+                  const pending = timers.get(sender);
+                  if (pending) {
+                    clearTimeout(pending);
+                    timers.delete(sender);
+                  }
+                  setTyping((prev) => {
+                    if (!prev || !(sender in prev)) return prev;
+                    const next = { ...prev };
+                    delete next[sender];
+                    return next;
+                  });
+                }
+              }
+              break;
             }
-            break;
-          }
-          case 'presence':
-            setCount(data.count || 0);
-            setUsers(Array.isArray(data.users) ? data.users : []);
-            break;
-          case 'typing': {
-            if (data.clientId === clientId) break;
-            const { clientId: who, name: whoName } = data;
-            setTyping((prev) => ({ ...prev, [who]: whoName || 'anon' }));
-            const existing = timers.get(who);
-            if (existing) clearTimeout(existing);
-            timers.set(
-              who,
-              setTimeout(() => {
-                timers.delete(who);
-                setTyping((prev) => {
-                  if (!prev) return prev;
-                  const next = { ...prev };
-                  delete next[who];
-                  return next;
-                });
-              }, TYPING_CLEAR_MS),
-            );
-            break;
-          }
-          case 'nick_ok':
-            setContacts(Array.isArray(data.contacts) ? data.contacts : []);
-            break;
-          case 'nick_error':
-            onNickErrorRef.current?.(data.reason);
-            break;
-          case 'contacts':
-            setContacts(Array.isArray(data.contacts) ? data.contacts : []);
-            setContactError('');
-            break;
-          case 'contact_error':
-            setContactError(data.reason === 'self' ? 'Itu nick kamu sendiri.' : 'Nick tidak ditemukan.');
-            break;
-          case 'dm': {
-            if (data.message) {
-              const m = data.message;
-              const other = m.from === nick ? m.to : m.from;
-              setDms((prev) => {
-                const safePrev = prev || {};
-                return {
-                  ...safePrev,
-                  [other]: [...(safePrev[other] ?? []), m].slice(-MAX_RENDERED),
-                };
-              });
-              setContacts((prev) => {
-                const safePrev = prev || [];
-                return safePrev.includes(other) ? safePrev : [...safePrev, other].sort();
-              });
-              if (m.from !== nick && activeRef.current !== other) {
-                setUnread((prev) => {
+            case 'presence':
+              setCount(data.count || 0);
+              setUsers(Array.isArray(data.users) ? data.users : []);
+              break;
+            case 'typing': {
+              if (data.clientId === clientId) break;
+              const { clientId: who, name: whoName } = data;
+              if (who) {
+                setTyping((prev) => ({ ...prev, [who]: whoName || 'anon' }));
+                const existing = timers.get(who);
+                if (existing) clearTimeout(existing);
+                timers.set(
+                  who,
+                  setTimeout(() => {
+                    timers.delete(who);
+                    setTyping((prev) => {
+                      if (!prev) return prev;
+                      const next = { ...prev };
+                      delete next[who];
+                      return next;
+                    });
+                  }, TYPING_CLEAR_MS),
+                );
+              }
+              break;
+            }
+            case 'nick_ok':
+              setContacts(Array.isArray(data.contacts) ? data.contacts : []);
+              break;
+            case 'nick_error':
+              onNickErrorRef.current?.(data.reason);
+              break;
+            case 'contacts':
+              setContacts(Array.isArray(data.contacts) ? data.contacts : []);
+              setContactError('');
+              break;
+            case 'contact_error':
+              setContactError(data.reason === 'self' ? 'Itu nick kamu sendiri.' : 'Nick tidak ditemukan.');
+              break;
+            case 'dm': {
+              if (data.message && data.message.id) {
+                const m = data.message;
+                const other = m.from === nick ? m.to : m.from;
+                setDms((prev) => {
                   const safePrev = prev || {};
-                  return { ...safePrev, [other]: (safePrev[other] ?? 0) + 1 };
+                  return { ...safePrev, [other]: [...(safePrev[other] ?? []), m].slice(-MAX_RENDERED) };
                 });
+                setContacts((prev) => {
+                  const safePrev = prev || [];
+                  return safePrev.includes(other) ? safePrev : [...safePrev, other].sort();
+                });
+                if (m.from !== nick && activeRef.current !== other) {
+                  setUnread((prev) => {
+                    const safePrev = prev || {};
+                    return { ...safePrev, [other]: (safePrev[other] ?? 0) + 1 };
+                  });
+                }
               }
+              break;
             }
-            break;
+            case 'dm_history':
+              if (data.with && Array.isArray(data.messages)) {
+                setDms((prev) => ({ ...(prev || {}), [data.with]: data.messages }));
+              }
+              break;
           }
-          case 'dm_history':
-            if (data.with && Array.isArray(data.messages)) {
-              setDms((prev) => ({ ...(prev || {}), [data.with]: data.messages }));
-            }
-            break;
+        } catch (err: any) {
+          console.error("[WebSocket Processing Error]:", err);
+          // Jika ada error fatal saat memproses pesan, tampilkan di UI bukan blank
+          setSysError(err?.message || "Terjadi kesalahan saat memproses data chat.");
         }
       });
 
@@ -254,7 +261,10 @@ export default function Chat({
         reconnectDelay = Math.min(reconnectDelay * 2, 30000);
       });
 
-      socket.addEventListener('error', () => socket.close());
+      socket.addEventListener('error', (event) => {
+        console.error("WebSocket Network Error:", event);
+        // Error koneksi websocket biasanya tertangkap di sini
+      });
     }
 
     connect();
@@ -267,20 +277,6 @@ export default function Chat({
       socketRef.current = null;
     };
   }, [clientId, nick, secret]);
-
-  if (status === 'connecting') {
-    return (
-      <div className="flex flex-1 w-full flex-col items-center justify-center bg-white dark:bg-zinc-950">
-        <h2 className="text-2xl font-bold mb-6 text-zinc-800 dark:text-zinc-100 animate-pulse">
-          Hallo?
-        </h2>
-        <div className="w-48 h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden relative">
-          <div className="absolute top-0 bottom-0 left-0 w-1/3 bg-blue-600 rounded-full animate-bounce" />
-        </div>
-        <p className="mt-4 text-xs text-zinc-400">Menghubungkan ke server...</p>
-      </div>
-    );
-  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -352,6 +348,40 @@ export default function Chat({
     lastTypingSent.current = 0;
   };
 
+  // UI RENDER: ERROR SCREEN
+  // Jika terjadi error fatal pada data UI, maka tampilkan layar ini
+  if (sysError) {
+    return (
+      <div className="flex flex-1 w-full flex-col items-center justify-center bg-white dark:bg-zinc-950 px-6 text-center">
+        <div className="bg-red-100 text-red-600 p-4 rounded-xl border border-red-200">
+          <h2 className="font-bold text-lg mb-2">Terjadi Kesalahan Sinkronisasi</h2>
+          <p className="text-sm mb-4">{sysError}</p>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="px-4 py-2 bg-red-600 text-white rounded-full text-sm font-medium"
+          >
+            Muat Ulang Halaman
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // UI RENDER: LOADING SCREEN
+  if (status === 'connecting') {
+    return (
+      <div className="flex flex-1 w-full flex-col items-center justify-center bg-white dark:bg-zinc-950">
+        <h2 className="text-2xl font-bold mb-6 text-zinc-800 dark:text-zinc-100 animate-pulse">
+          Hallo?
+        </h2>
+        <div className="w-48 h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden relative">
+          <div className="absolute top-0 bottom-0 left-0 w-1/3 bg-blue-600 rounded-full animate-bounce" />
+        </div>
+        <p className="mt-4 text-xs text-zinc-400">Menghubungkan ke server...</p>
+      </div>
+    );
+  }
+
   const typingNames = active ? [] : Object.values(typing || {});
   const typingLabel =
     typingNames.length === 0
@@ -362,7 +392,6 @@ export default function Chat({
           ? `${typingNames[0]} and ${typingNames[1]} are typing…`
           : 'Several people are typing…';
 
-  // Fallback Aman untuk mapping
   const safeDms = Array.isArray(dms[active || '']) ? dms[active || ''] : [];
   const safeMessages = Array.isArray(messages) ? messages : [];
 
@@ -386,7 +415,6 @@ export default function Chat({
 
   return (
     <div className="flex flex-1 w-full max-w-2xl flex-col relative">
-      {/* Container Popup */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none">
         {(popups || []).filter(Boolean).map((popup) => (
           <div
@@ -401,7 +429,6 @@ export default function Chat({
         ))}
       </div>
 
-      {/* Profil Modal */}
       {showProfile && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-zinc-900 rounded-2xl w-full max-w-xs p-6 flex flex-col items-center shadow-xl">
@@ -426,7 +453,6 @@ export default function Chat({
         </div>
       )}
 
-      {/* Header */}
       <header className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-black/10 bg-white px-4 py-3 dark:border-white/15 dark:bg-zinc-950">
         <div className="flex items-center gap-3">
           <button onClick={() => setShowProfile(true)} className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left">
@@ -446,7 +472,6 @@ export default function Chat({
                 title={`@${user.nick || user.name || 'anon'} - ${user.customStatus || 'sedang online'}`}
                 className="inline-flex rounded-full ring-2 ring-white dark:ring-zinc-950"
               >
-                {/* Fallback di Avatar sangat penting agar tidak crash */}
                 <Avatar size={24} name={user.clientId || 'anon'} variant="beam" />
               </span>
             ))}
@@ -460,7 +485,6 @@ export default function Chat({
         </div>
       </header>
 
-      {/* Nav Tab */}
       <nav className="flex items-center gap-2 overflow-x-auto border-b border-black/10 px-4 py-2 dark:border-white/15">
         <button type="button" onClick={() => selectChat(null)} className={chip(active === null)}>
           Global
@@ -482,7 +506,6 @@ export default function Chat({
         ))}
       </nav>
 
-      {/* Form Tambah Kontak */}
       <form onSubmit={addContact} className="flex items-center gap-2 border-b border-black/10 px-4 py-2 dark:border-white/15">
         <input
           value={contactInput}
@@ -492,7 +515,11 @@ export default function Chat({
           autoCorrect="off"
           className="min-w-0 flex-1 rounded-full border border-black/10 bg-transparent px-3 py-1.5 text-xs outline-none focus:border-blue-500 dark:border-white/15"
         />
-        <button type="submit" disabled={!contactInput.trim()} className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900">
+        <button
+          type="submit"
+          disabled={status !== 'online' || !contactInput.trim()}
+          className="rounded-full bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
+        >
           Tambah
         </button>
         <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
@@ -501,7 +528,6 @@ export default function Chat({
       </form>
       {contactError && <p className="px-4 pt-1 text-xs text-red-500">{contactError}</p>}
 
-      {/* List Chat */}
       <ol className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-4">
         {active && rows.length === 0 && (
           <li className="self-center text-xs text-zinc-400 dark:text-zinc-500">
@@ -519,7 +545,6 @@ export default function Chat({
           return (
             <li key={row.id} className={`flex items-end gap-2 ${row.mine ? 'flex-row-reverse' : 'flex-row'}`}>
               <span className="shrink-0">
-                {/* Fallback di Avatar sangat penting agar tidak crash */}
                 <Avatar size={28} name={row.seed || 'anon'} variant="beam" />
               </span>
               <div className={`flex min-w-0 max-w-[75%] flex-col ${row.mine ? 'items-end' : 'items-start'}`}>
@@ -547,7 +572,11 @@ export default function Chat({
           placeholder={active ? `Pesan ke @${active}` : 'Message'}
           className="flex-1 rounded-full border border-black/10 bg-transparent px-4 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/15"
         />
-        <button type="submit" disabled={status !== 'online' || !draft.trim()} className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white disabled:opacity-40">
+        <button
+          type="submit"
+          disabled={status !== 'online' || !draft.trim()}
+          className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white disabled:opacity-40"
+        >
           Send
         </button>
       </form>
