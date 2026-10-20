@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import Avatar from 'boring-avatars';
 import Chat from './Chat';
+import ThemeToggle from './ThemeToggle';
 
 const ID_KEY = 'chat:clientId';
 const NICK_KEY = 'chat:nick';
@@ -81,6 +82,7 @@ export default function ChatRoom() {
       onSubmit={join}
       className="mx-auto flex flex-1 w-full max-w-sm flex-col items-center justify-center gap-5 px-6"
     >
+      <ThemeToggle className="fixed right-4 top-4" />
       <Avatar size={64} name={clientId} variant="beam" />
       <div className="text-center">
         <h1 className="text-2xl font-semibold tracking-tight">Login Chat</h1>
