@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Realtime chat",
+  title: "Hallo?",
   description:
     "A realtime chat with live user count, typing indicators, and avatars over WebSockets on Vercel.",
 };
