@@ -27,7 +27,7 @@ import { fieldsToObject, redis } from "./redis";
  */
 
 export type Message = { id: string; kind: "chat" | "system"; clientId: string; name: string; text: string; ts: number; avatarUrl?: string };
-export type User = { clientId: string; name: string; customStatus?: string; avatarUrl?: string };
+export type User = { clientId: string; name: string; nick?: string; customStatus?: string; avatarUrl?: string };
 export type DM = { id: string; from: string; to: string; text: string; ts: number };
 
 type ServerEvent =
@@ -56,16 +56,17 @@ const DMLOG_MAXLEN = 100; // riwayat per pasangan nick
 const DM_HISTORY = 50;
 const NICK_RE = /^[a-z0-9_]{3,20}$/;
 
-const CONN_TTL_MS = 30_000; // a connection is gone if not refreshed within this window
-const HEARTBEAT_MS = 10_000; // how often we refresh our local connections
-const PRESENCE_MS = 3_000; // how often we recompute + broadcast presence
+const CONN_TTL_MS = 60_000; // a connection is gone if not refreshed within this window
+const HEARTBEAT_MS = 20_000; // how often we refresh our local connections
+const PRESENCE_MS = 5_000; // how often we recompute + broadcast presence
 const BLOCK_MS = 5_000; // XREAD BLOCK timeout — wakes the loop to observe shutdown
 const MSG_MAXLEN = 200; // cap the message stream
 const TYPING_MAXLEN = 50;
 const NOTIF_MAXLEN = 50; // cap the typing stream
 const HISTORY = 50; // messages replayed to a newly-joined client
 
-type ConnMeta = { clientId: string; name: string; avatarUrl?: string; customStatus?: string };
+type NotifType = "user_joined" | "user_left" | "presence_refresh";
+type ConnMeta = { clientId: string; name: string; nick?: string; avatarUrl?: string; customStatus?: string };
 type Conn = { connectionId: string; clientId: string; name: string; nick: string; avatarUrl?: string; customStatus?: string };
 type StreamFields = { d: string; o: string };
 
@@ -132,16 +133,18 @@ function broadcast(event: ServerEvent): void {
 async function touch(conn: Conn): Promise<void> {
   if (!redis || !conn.clientId) return;
   try {
-    await redis.zadd(CONNS_KEY, Date.now(), conn.connectionId);
-    await redis.hset(
-      META_KEY,
-      conn.connectionId,
-      JSON.stringify({
-        clientId: conn.clientId,
-        name: conn.name,
-        customStatus: conn.customStatus || "sedang online",
-      } satisfies ConnMeta),
-    );
+    const meta: ConnMeta = {
+      clientId: conn.clientId,
+      name: conn.name,
+      nick: conn.nick || undefined,
+      avatarUrl: conn.avatarUrl || undefined,
+      customStatus: conn.customStatus || "sedang online",
+    };
+    await redis
+      .pipeline()
+      .zadd(CONNS_KEY, Date.now(), conn.connectionId)
+      .hset(META_KEY, conn.connectionId, JSON.stringify(meta))
+      .exec();
   } catch (err) {
     console.error("[chat] touch failed", err);
   }
@@ -154,7 +157,13 @@ async function computePresence(): Promise<{ count: number; users: User[] }> {
   if (!redis) {
     for (const conn of hub.conns.values()) {
       if (conn.clientId)
-        seen.set(conn.clientId, { clientId: conn.clientId, name: conn.name, customStatus: conn.customStatus || "sedang online" });
+        seen.set(conn.clientId, {
+          clientId: conn.clientId,
+          name: conn.name,
+          nick: conn.nick || conn.name,
+          avatarUrl: conn.avatarUrl || undefined,
+          customStatus: conn.customStatus || "sedang online",
+        });
     }
     return { count: seen.size, users: [...seen.values()] };
   }
@@ -178,6 +187,8 @@ async function computePresence(): Promise<{ count: number; users: User[] }> {
         seen.set(entry.clientId, {
           clientId: entry.clientId,
           name: entry.name,
+          nick: entry.nick || entry.name,
+          avatarUrl: entry.avatarUrl || undefined,
           customStatus: entry.customStatus || "sedang online",
         });
       }
@@ -278,8 +289,9 @@ async function runReadLoop(): Promise<void> {
             // [BARU] Handler stream notifikasi join/leave
             hub.lastNotifId = id;
             if (fields.o === hub.instanceId) continue;
-            const notif = parseJson<{type: "user_joined" | "user_left"; nick: string}>(fields.d);
-            if (notif) broadcast(notif);
+            const notif = parseJson<{ type: NotifType; nick: string }>(fields.d);
+            if (notif?.type === "presence_refresh") void broadcastPresence(true);
+            else if (notif) broadcast(notif as { type: "user_joined" | "user_left"; nick: string });
           }
         }
       }
@@ -398,14 +410,18 @@ export async function join(
 export async function setStatus(ws: WebSocket, status: string, avatarUrl?: string): Promise<void> {
   const conn = hub.conns.get(ws);
   if (!conn) return;
-  conn.customStatus = clamp(status, 60, "sedang online");
-  
-  if (avatarUrl !== undefined) {
-    conn.avatarUrl = clamp(avatarUrl, 500, ""); // Mengizinkan URL gambar hingga 500 karakter
-  }
-  
+  const nextStatus = clamp(status, 60, "sedang online") || "sedang online";
+  // Hanya https (http diblok browser di halaman https dan bisa dipakai melacak IP).
+  const raw = avatarUrl === undefined ? conn.avatarUrl ?? "" : clamp(avatarUrl, 500);
+  const nextAvatar = /^https:\/\/\S+$/i.test(raw) ? raw : "";
+  if (nextStatus === conn.customStatus && nextAvatar === (conn.avatarUrl ?? "")) return; // tidak berubah
+  conn.customStatus = nextStatus;
+  conn.avatarUrl = nextAvatar;
+
   await touch(conn);
   await broadcastPresence(true);
+  // Instance lain ikut menyiarkan presence terbaru sekarang, tanpa menunggu polling.
+  await publishNotif("presence_refresh", "");
 }
 
 export async function postMessage(ws: WebSocket, text: string): Promise<void> {
@@ -469,8 +485,8 @@ export async function postTyping(ws: WebSocket): Promise<void> {
     console.error("[chat] typing xadd failed", err);
   }
 }
-async function publishNotif(type: "user_joined" | "user_left", nick: string): Promise<void> {
-  broadcast({ type, nick }); // Tembak ke koneksi lokal instance ini
+async function publishNotif(type: NotifType, nick: string): Promise<void> {
+  if (type !== "presence_refresh") broadcast({ type, nick }); // Tembak ke koneksi lokal instance ini
   if (!redis) return;
   try {
     await redis.xadd(NOTIF_STREAM, "MAXLEN", "~", NOTIF_MAXLEN, "*", "d", JSON.stringify({ type, nick }), "o", hub.instanceId);
@@ -595,7 +611,9 @@ export async function setNick(ws: WebSocket, rawNick: string, rawSecret: string)
   }
   conn.nick = nick;
   send(ws, { type: "nick_ok", nick, contacts: await listContacts(nick) });
-await publishNotif("user_joined", nick);
+  await touch(conn); // simpan nick ke presence supaya klien lain bisa mencocokkan avatar
+  await broadcastPresence(true);
+  await publishNotif("user_joined", nick);
 }
 
 /** Tambah kontak berdasarkan nick (nick harus sudah terdaftar). */
